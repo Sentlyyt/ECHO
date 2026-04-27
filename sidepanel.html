@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ECHO (Запись и траскрибация встреч)</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f5f5f7;
+      color: #1c1c1e;
+      min-height: 100vh;
+    }
+
+    /* ── Setup screen ── */
+    #setup-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 32px 20px;
+      text-align: center;
+    }
+
+    .setup-icon { font-size: 48px; margin-bottom: 16px; }
+    .setup-title { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+    .setup-sub { font-size: 13px; color: #666; line-height: 1.5; margin-bottom: 24px; }
+    .setup-sub a { color: #d62d20; text-decoration: none; font-weight: 600; }
+    .setup-sub a:hover { text-decoration: underline; }
+
+    .setup-field { width: 100%; margin-bottom: 12px; text-align: left; }
+    .setup-field label {
+      font-size: 11px; font-weight: 600; color: #999;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      display: block; margin-bottom: 6px;
+    }
+    .setup-field input {
+      width: 100%; padding: 11px 14px;
+      border: 1.5px solid #e5e5ea; border-radius: 10px;
+      font-size: 13px; outline: none; transition: border-color 0.15s;
+      font-family: monospace;
+    }
+    .setup-field input:focus { border-color: #d62d20; }
+
+    .btn-setup-save {
+      width: 100%; padding: 12px;
+      background: #d62d20; color: #fff;
+      border: none; border-radius: 10px;
+      font-size: 14px; font-weight: 700; cursor: pointer; transition: background 0.15s;
+    }
+    .btn-setup-save:hover { background: #b52518; }
+    .btn-setup-save:disabled { background: #ccc; cursor: default; }
+    .setup-err { margin-top: 10px; font-size: 12px; color: #d62d20; min-height: 16px; }
+
+    /* ── Main screen ── */
+    #main-screen { display: none; flex-direction: column; min-height: 100vh; }
+
+    header {
+      background: #010101;
+      padding: 14px 16px;
+      border-bottom: 1px solid #1f1f1f;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      overflow: hidden;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 3px 0;
+      overflow: hidden;
+    }
+
+    .logo img {
+      display: block;
+      height: 82px;
+      width: auto;
+      max-width: 100%;
+      object-fit: contain;
+    }
+
+    .rec-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: #d62d20; display: inline-block;
+    }
+    .rec-dot.active { animation: pulse 1.5s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.3); }
+    }
+
+    #status-badge {
+      font-size: 11px; padding: 3px 10px;
+      border-radius: 12px; background: #2a2a2d; color: #a7a7ad; font-weight: 500;
+      flex: 0 0 auto;
+      white-space: nowrap;
+    }
+    #status-badge.recording  { background: #ffeaea; color: #d62d20; }
+    #status-badge.processing { background: #fff3e0; color: #e65100; }
+    #status-badge.done       { background: #e8f5e9; color: #2e7d32; }
+
+    /* ── Tab bar ── */
+    .tab-bar {
+      display: flex;
+      background: #fff;
+      border-bottom: 1px solid #e5e5ea;
+      position: sticky;
+      top: 49px;
+      z-index: 9;
+    }
+
+    .tab-btn {
+      flex: 1;
+      padding: 10px;
+      border: none;
+      background: none;
+      font-size: 13px;
+      font-weight: 600;
+      color: #999;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+      border-radius: 0;
+    }
+    .tab-btn:hover { color: #555; opacity: 1; }
+    .tab-btn.active { color: #d62d20; border-bottom-color: #d62d20; }
+
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* ── Content ── */
+    .tab-content > .inner { padding: 12px; }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+
+    .card-title {
+      font-size: 11px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      color: #999; margin-bottom: 8px;
+    }
+
+    #transcript-text, #summary-text {
+      font-size: 13px; line-height: 1.6; color: #1c1c1e;
+      white-space: pre-wrap; word-break: break-word;
+      max-height: 300px; overflow-y: auto;
+    }
+
+    .empty { color: #bbb; font-size: 13px; font-style: italic; }
+
+    .actions { display: flex; gap: 8px; margin-top: 10px; }
+
+    button {
+      flex: 1; padding: 9px 12px; border: none; border-radius: 8px;
+      font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity 0.15s;
+    }
+    button:hover  { opacity: 0.85; }
+    button:disabled { opacity: 0.4; cursor: default; }
+
+    .btn-primary   { background: #d62d20; color: #fff; }
+    .btn-secondary { background: #e5e5ea; color: #1c1c1e; }
+    .btn-copy      { background: #e5e5ea; color: #1c1c1e; flex: 0 0 auto; padding: 6px 14px; font-size: 12px; }
+    .btn-back      { background: transparent; color: #555; flex: 0 0 auto; padding: 6px 0; font-size: 12px; }
+    .btn-back:hover { color: #d62d20; opacity: 1; }
+
+    .card-header {
+      display: flex; align-items: center;
+      justify-content: space-between; margin-bottom: 8px;
+    }
+
+    #timer {
+      font-size: 13px; font-weight: 600; color: #d62d20;
+      font-variant-numeric: tabular-nums; display: none;
+    }
+
+    /* ── File upload ── */
+    .file-drop-area {
+      border: 2px dashed #e5e5ea; border-radius: 10px;
+      padding: 16px; text-align: center; cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .file-drop-area:hover, .file-drop-area.dragover {
+      border-color: #d62d20; background: #fff8f7;
+    }
+    .file-drop-icon { font-size: 24px; margin-bottom: 6px; }
+    .file-drop-label { font-size: 12px; color: #888; line-height: 1.4; }
+    .file-drop-label strong { color: #d62d20; }
+    .file-chosen-name {
+      font-size: 12px; font-weight: 600; color: #1c1c1e;
+      margin: 8px 0 4px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    #upload-status { margin-top: 8px; font-size: 12px; color: #888; min-height: 16px; }
+
+    /* ── History ── */
+    #history-list { list-style: none; }
+
+    .history-day-group + .history-day-group {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid #ececf1;
+    }
+
+    .history-day-title {
+      font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      color: #999; margin-bottom: 6px;
+    }
+    .history-day-list { list-style: none; }
+
+    #history-list li {
+      padding: 8px 0;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    #history-list li:last-child { border-bottom: none; }
+
+    .hi-main-row {
+      display: flex; align-items: flex-start;
+      justify-content: space-between; gap: 8px;
+    }
+
+    .history-info { flex: 1; cursor: pointer; min-width: 0; }
+    .history-info:hover .hi-date { color: #d62d20; }
+    .hi-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px;
+    }
+    .hi-title {
+      font-size: 12px; font-weight: 700; color: #1c1c1e;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      margin-bottom: 3px;
+    }
+    .hi-date { font-size: 12px; font-weight: 600; color: #555; }
+    .hi-preview { color: #bbb; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+
+    .meeting-status {
+      flex: 0 0 auto;
+      display: inline-flex; align-items: center;
+      padding: 2px 8px; border-radius: 999px;
+      font-size: 10px; font-weight: 700; white-space: nowrap;
+    }
+    .meeting-status--recording { background: #ffeaea; color: #d62d20; }
+    .meeting-status--recorded { background: #eef2f6; color: #5f6b7a; }
+    .meeting-status--transcribing { background: #fff3e0; color: #e65100; }
+    .meeting-status--done { background: #e8f5e9; color: #2e7d32; }
+    .meeting-status--error { background: #fdecea; color: #b42318; }
+
+    .pending-list { list-style: none; }
+    .pending-list li {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; padding: 8px 0; border-bottom: 1px solid #f0f0f0;
+    }
+    .pending-list li:last-child { border-bottom: none; }
+    .pending-info { min-width: 0; flex: 1 1 auto; }
+    .pending-date { font-size: 12px; font-weight: 600; color: #555; }
+    .pending-meta {
+      display: flex; align-items: center; gap: 6px; margin-top: 4px;
+      flex-wrap: wrap;
+    }
+    .pending-note { font-size: 11px; color: #999; }
+    .pending-action {
+      flex: 0 0 auto; width: auto; padding: 6px 12px;
+      font-size: 12px; font-weight: 700;
+      background: #d62d20; color: #fff;
+      border: none; border-radius: 8px; cursor: pointer;
+    }
+    .pending-action:hover { background: #b52518; opacity: 1; }
+
+    .btn-retranscribe {
+      flex: 0 0 auto; font-size: 11px; font-weight: 600;
+      padding: 4px 10px; background: #f0f0f0; color: #555;
+      border: none; border-radius: 8px; cursor: pointer;
+      white-space: nowrap; transition: background 0.15s;
+    }
+    .btn-retranscribe:hover { background: #e0e0e0; }
+    .btn-retranscribe:disabled { opacity: 0.4; cursor: default; }
+
+    /* ── Tag pills in history ── */
+    .hi-tags-row {
+      display: flex; flex-wrap: wrap; align-items: center;
+      gap: 4px; margin-top: 5px;
+    }
+
+    .tag-pill {
+      display: inline-flex; align-items: center; gap: 3px;
+      font-size: 10px; font-weight: 600; padding: 2px 7px;
+      border-radius: 10px; white-space: nowrap;
+    }
+
+    .btn-tag-toggle {
+      flex: 0 0 auto; width: auto; padding: 2px 6px;
+      font-size: 11px; font-weight: 700;
+      background: #f0f0f0; color: #888;
+      border: none; border-radius: 8px; cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-tag-toggle:hover { background: #e0e0e0; opacity: 1; }
+    .btn-tag-toggle.open { background: #d62d20; color: #fff; }
+
+    /* ── Tag picker (accordion) ── */
+    .tag-picker {
+      margin-top: 8px; padding: 10px;
+      background: #f9f9fb; border-radius: 10px;
+      border: 1px solid #e5e5ea;
+    }
+
+    .tag-picker-presets {
+      display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px;
+    }
+
+    .tag-check-label {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 11px; font-weight: 600; padding: 3px 9px;
+      border-radius: 10px; border: 1.5px solid;
+      cursor: pointer; transition: background 0.12s;
+      user-select: none;
+    }
+    .tag-check-label input { display: none; }
+
+    .tag-picker-one-time {
+      display: flex; gap: 6px; margin-bottom: 8px;
+    }
+    .tag-picker-one-time input {
+      flex: 1; padding: 6px 10px;
+      border: 1.5px solid #e5e5ea; border-radius: 8px;
+      font-size: 11px; outline: none; font-family: inherit;
+      transition: border-color 0.15s;
+    }
+    .tag-picker-one-time input:focus { border-color: #d62d20; }
+    .btn-add-one-time {
+      flex: 0 0 auto; width: auto; padding: 6px 10px;
+      font-size: 13px; font-weight: 700;
+      background: #e5e5ea; color: #555;
+      border: none; border-radius: 8px; cursor: pointer;
+    }
+    .btn-add-one-time:hover { background: #d0d0d0; opacity: 1; }
+
+    .tag-picker-footer {
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .tag-count { font-size: 11px; color: #aaa; }
+    .btn-save-tags {
+      flex: 0 0 auto; width: auto; padding: 6px 14px;
+      font-size: 12px; font-weight: 700;
+      background: #d62d20; color: #fff;
+      border: none; border-radius: 8px; cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-save-tags:hover { background: #b52518; opacity: 1; }
+
+    /* ── Tag filter ── */
+    .history-filter-wrap { margin-bottom: 8px; }
+    #history-tag-filter {
+      width: 100%; padding: 8px 12px;
+      border: 1.5px solid #e5e5ea; border-radius: 8px;
+      font-size: 12px; outline: none; background: #fff;
+      transition: border-color 0.15s; font-family: inherit;
+      color: #1c1c1e;
+    }
+    #history-tag-filter:focus { border-color: #d62d20; }
+
+    /* ── History actions (export/import) ── */
+    .btn-history-action {
+      flex: none; width: auto; font-size: 11px; font-weight: 600;
+      padding: 4px 10px; background: #f0f0f0; color: #555;
+      border: none; border-radius: 8px; cursor: pointer; transition: background 0.15s;
+    }
+    .btn-history-action:hover { background: #e0e0e0; opacity: 1; }
+
+    /* ── History search ── */
+    .history-search-wrap { margin-bottom: 8px; }
+    #history-search {
+      width: 100%; padding: 8px 12px;
+      border: 1.5px solid #e5e5ea; border-radius: 8px;
+      font-size: 12px; outline: none; transition: border-color 0.15s; font-family: inherit;
+    }
+    #history-search:focus { border-color: #d62d20; }
+
+    /* ── API key settings ── */
+    .api-settings { margin-top: 6px; }
+
+    .btn-api-toggle {
+      background: none; border: none; font-size: 11px; color: #aaa;
+      cursor: pointer; padding: 0; flex: none; width: auto;
+      font-weight: 500; text-decoration: underline; text-underline-offset: 2px;
+      transition: color 0.15s;
+    }
+    .btn-api-toggle:hover { color: #d62d20; opacity: 1; }
+
+    .api-panel {
+      display: none; background: #f9f9fb; border-radius: 10px;
+      padding: 14px; margin-top: 8px; border: 1px solid #e5e5ea;
+    }
+    .api-panel.open { display: block; }
+    .api-panel label {
+      font-size: 11px; font-weight: 600; color: #999;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      display: block; margin-bottom: 6px;
+    }
+    .api-panel input {
+      width: 100%; padding: 9px 12px;
+      border: 1.5px solid #e5e5ea; border-radius: 8px;
+      font-size: 12px; font-family: monospace; outline: none;
+      margin-bottom: 8px; transition: border-color 0.15s;
+    }
+    .api-panel input:focus { border-color: #d62d20; }
+    .api-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .api-hint { font-size: 11px; color: #999; line-height: 1.4; }
+    .api-hint a { color: #d62d20; text-decoration: none; font-weight: 600; }
+    .api-hint a:hover { text-decoration: underline; }
+    .btn-api-save {
+      flex: 0 0 auto; padding: 7px 16px;
+      background: #d62d20; color: #fff;
+      border: none; border-radius: 8px;
+      font-size: 12px; font-weight: 700; cursor: pointer; transition: background 0.15s;
+    }
+    .btn-api-save:hover { background: #b52518; }
+    .api-saved { font-size: 11px; color: #2e7d32; font-weight: 600; display: none; }
+
+    /* ── Tags tab ── */
+    .tag-mgmt-add-row {
+      display: flex; gap: 8px; margin-bottom: 12px;
+    }
+    .tag-mgmt-add-row input {
+      flex: 1; padding: 8px 12px;
+      border: 1.5px solid #e5e5ea; border-radius: 8px;
+      font-size: 13px; outline: none; font-family: inherit;
+      transition: border-color 0.15s;
+    }
+    .tag-mgmt-add-row input:focus { border-color: #d62d20; }
+    .btn-tag-add {
+      flex: 0 0 auto; width: auto; padding: 8px 16px;
+      background: #d62d20; color: #fff; border: none;
+      border-radius: 8px; font-size: 13px; font-weight: 700;
+      cursor: pointer; transition: background 0.15s;
+    }
+    .btn-tag-add:hover { background: #b52518; opacity: 1; }
+
+    #preset-tags-list {
+      display: flex; flex-wrap: wrap; gap: 8px;
+    }
+
+    .tag-mgmt-pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 12px; font-weight: 600; padding: 5px 10px;
+      border-radius: 12px; border: 1.5px solid;
+    }
+
+    .tag-mgmt-delete {
+      flex: none; width: auto; padding: 0;
+      background: none; border: none; font-size: 14px; line-height: 1;
+      cursor: pointer; opacity: 0.5; transition: opacity 0.15s;
+    }
+    .tag-mgmt-delete:hover { opacity: 1; }
+
+    .tags-empty { font-size: 12px; color: #bbb; font-style: italic; padding: 4px 0; }
+
+    .tag-hint {
+      font-size: 11px; color: #aaa; line-height: 1.5; margin-top: 12px;
+      padding-top: 10px; border-top: 1px solid #f0f0f0;
+    }
+
+    /* ── Toast ── */
+    .copied-toast {
+      position: fixed; bottom: 16px; left: 50%;
+      transform: translateX(-50%);
+      background: #1c1c1e; color: #fff;
+      padding: 8px 18px; border-radius: 20px;
+      font-size: 12px; font-weight: 500;
+      opacity: 0; transition: opacity 0.2s; pointer-events: none;
+    }
+    .copied-toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+
+<!-- ── Setup screen ── -->
+<div id="setup-screen">
+  <div class="setup-icon">🎙</div>
+  <div class="setup-title">ECHO</div>
+  <p class="setup-sub">
+    Для работы нужен бесплатный ключ Groq.<br>
+    Получи его на <a href="https://console.groq.com/keys" target="_blank">console.groq.com/keys</a> —<br>
+    регистрация бесплатна, лимиты щедрые.
+  </p>
+  <div class="setup-field">
+    <label>Groq API ключ</label>
+    <input type="password" id="setup-key" placeholder="gsk_...">
+  </div>
+  <button class="btn-setup-save" id="btn-setup-save">Сохранить и начать</button>
+  <div class="setup-err" id="setup-err"></div>
+</div>
+
+<!-- ── Main screen ── -->
+<div id="main-screen">
+
+  <header>
+    <div class="logo">
+      <span class="rec-dot" id="rec-dot" style="display:none;"></span>
+      <img src="logo.png" alt="ECHO">
+    </div>
+    <span id="status-badge">Ожидание</span>
+  </header>
+
+  <nav class="tab-bar">
+    <button class="tab-btn active" data-tab="meetings">Встречи</button>
+    <button class="tab-btn" data-tab="tags">Теги</button>
+  </nav>
+
+  <!-- ── Tab: Встречи ── -->
+  <div class="tab-content active" id="tab-meetings">
+    <div class="inner">
+
+      <!-- Recording controls -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Запись</span>
+          <span id="timer">00:00</span>
+        </div>
+        <div class="actions">
+          <button class="btn-primary" id="btn-record">⏺ Начать запись</button>
+          <button class="btn-secondary" id="btn-open-recordings" style="flex: 0 0 auto; padding: 9px 12px; font-size: 12px;">📁 Записи</button>
+        </div>
+      </div>
+
+      <!-- File upload -->
+      <div class="card">
+        <div class="card-title">Транскрибировать файл</div>
+        <input type="file" id="file-input" accept="audio/*,video/*,.mp3,.mp4,.m4a,.wav,.webm,.ogg,.flac" style="display:none">
+        <div class="file-drop-area" id="file-drop-area">
+          <div class="file-drop-icon">📁</div>
+          <div class="file-drop-label">Нажми или перетащи файл<br><strong>Аудио или видео</strong> · до 25 МБ</div>
+        </div>
+        <div class="file-chosen-name" id="file-chosen-name" style="display:none"></div>
+        <div id="upload-status"></div>
+        <div class="actions" id="file-actions" style="display:none; margin-top:8px;">
+          <button class="btn-primary" id="btn-transcribe-file">▶ Транскрибировать</button>
+          <button class="btn-secondary" id="btn-cancel-file">Отмена</button>
+        </div>
+      </div>
+
+      <!-- Transcript -->
+      <div class="card" id="transcript-card" style="display:none;">
+        <div class="card-header">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <button class="btn-back" id="btn-back-from-history" style="display:none;">← Назад</button>
+            <span class="card-title" style="margin:0;">Транскрипт</span>
+          </div>
+          <button class="btn-copy" id="btn-copy-transcript">Копировать</button>
+        </div>
+        <div id="transcript-text" class="empty">Появится после остановки записи...</div>
+      </div>
+
+      <!-- Summary -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Транскрипт + промпт<br>для саммари</span>
+          <button class="btn-copy" id="btn-copy-prompt">Копировать</button>
+        </div>
+        <div id="summary-text" class="empty">Появится вместе с транскриптом...</div>
+      </div>
+
+      <!-- Pending recordings -->
+      <div class="card" id="pending-recordings-card" style="display:none;">
+        <div class="card-header">
+          <span class="card-title" style="margin:0;">Незавершённые записи</span>
+        </div>
+        <ul class="pending-list" id="pending-recordings-list"></ul>
+      </div>
+
+      <!-- History -->
+      <div class="card">
+        <div class="card-header" style="margin-bottom:10px;">
+          <span class="card-title" style="margin:0;">История встреч</span>
+          <div style="display:flex; gap:6px;">
+            <button class="btn-history-action" id="btn-export-history" title="Сохранить историю в файл">⬇ Экспорт</button>
+            <button class="btn-history-action" id="btn-import-history" title="Восстановить из файла">⬆ Импорт</button>
+            <input type="file" id="import-file-input" accept=".json" style="display:none">
+          </div>
+        </div>
+        <div class="history-filter-wrap">
+          <select id="history-tag-filter">
+            <option value="">Все теги</option>
+          </select>
+        </div>
+        <div class="history-search-wrap">
+          <input type="text" id="history-search" placeholder="🔍 Поиск по транскрипту, дате или тегам...">
+        </div>
+        <div id="import-status" style="font-size:11px; color:#888; min-height:14px; margin-bottom:4px;"></div>
+        <ul id="history-list">
+          <li class="empty" style="display:block; padding:8px 0;">Пока нет записей</li>
+        </ul>
+      </div>
+
+      <!-- API key settings -->
+      <div class="card api-settings">
+        <div style="display:flex; align-items:center; justify-content:space-between;">
+          <span class="card-title" style="margin:0;">Groq API</span>
+          <button class="btn-api-toggle" id="btn-api-toggle">Поменять ключ</button>
+        </div>
+        <div class="api-panel" id="api-panel">
+          <label>API ключ</label>
+          <input type="password" id="api-key-input" placeholder="gsk_...">
+          <div class="api-row">
+            <span class="api-hint">
+              Ключ на <a href="https://console.groq.com/keys" target="_blank">console.groq.com/keys</a><br>
+              Бесплатно в рамках лимитов Groq
+            </span>
+            <button class="btn-api-save" id="btn-api-save">Сохранить</button>
+          </div>
+          <div class="api-saved" id="api-saved">✓ Ключ сохранён</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── Tab: Теги ── -->
+  <div class="tab-content" id="tab-tags">
+    <div class="inner">
+      <div class="card">
+        <div class="card-title">Управление тегами</div>
+        <div class="tag-mgmt-add-row">
+          <input type="text" id="new-tag-input" placeholder="Название тега..." maxlength="30">
+          <button class="btn-tag-add" id="btn-add-tag">+ Добавить</button>
+        </div>
+        <div id="preset-tags-list">
+          <div class="tags-empty">Нет тегов. Добавь первый!</div>
+        </div>
+        <div class="tag-hint">
+          Теги используются для фильтрации встреч в истории.<br>
+          После транскрипции они подбираются автоматически.
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /main-screen -->
+
+<div class="copied-toast" id="copied-toast">Скопировано ✓</div>
+
+<footer style="
+  position: fixed; bottom: 10px; right: 14px;
+  font-size: 10px; color: #ccc;
+  pointer-events: none; user-select: none;
+">© Гапоненко Дмитрий</footer>
+
+<script src="db.js"></script>
+<script src="sidepanel.js"></script>
+</body>
+</html>

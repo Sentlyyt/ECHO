@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "ECHO (Запись и траскрибация встреч)",
+  "version": "1.1",
+  "description": "Записывает встречи Телемост и транскрибирует через Groq",
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "storage",
+    "downloads",
+    "notifications",
+    "clipboardWrite",
+    "activeTab",
+    "tabs",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "https://telemost.yandex.ru/*",
+    "https://telemost.yandex.com/*",
+    "https://api.groq.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://telemost.yandex.ru/*",
+        "https://telemost.yandex.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

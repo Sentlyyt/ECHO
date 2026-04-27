@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      padding: 16px;
+      width: 300px;
+      background: #fff;
+      color: #1c1c1e;
+    }
+    h2 {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    label {
+      font-size: 12px;
+      color: #666;
+      display: block;
+      margin-bottom: 4px;
+    }
+    input {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      font-size: 13px;
+      outline: none;
+    }
+    input:focus { border-color: #d62d20; }
+    button {
+      margin-top: 10px;
+      width: 100%;
+      padding: 10px;
+      background: #d62d20;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: #b52518; }
+    .saved {
+      color: #30a14e;
+      font-size: 12px;
+      margin-top: 6px;
+      text-align: center;
+      display: none;
+    }
+    .hint {
+      font-size: 11px;
+      color: #999;
+      margin-top: 8px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <h2>🎙 ECHO</h2>
+  <label>Groq API ключ</label>
+  <input type="password" id="apiKey" placeholder="gsk_...">
+  <button id="save">Сохранить</button>
+  <div class="saved" id="saved">✓ Сохранено</div>
+  <p class="hint">Ключ получи на <strong>console.groq.com</strong> → API Keys.<br>Транскрипция бесплатна в рамках лимитов Groq.</p>
+  <script src="popup.js"></script>
+</body>
+</html>
