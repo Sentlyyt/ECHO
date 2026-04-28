@@ -57,6 +57,7 @@
   let recording = false;
   let recordingStartedAt = null;
   let overlayTimerInterval = null;
+  const START_FROM_ACTION_MESSAGE = 'Сначала откройте расширение ECHO для открытия доступа или запустите запись изнутри';
 
   function setStatus(msg, autohide = 5000) {
     status.textContent = msg;
@@ -114,7 +115,7 @@
         if (resp && resp.success) {
           setRecording(true, resp.startedAt || Date.now());
         } else {
-          setStatus('❌ Не удалось начать запись. Открой панель расширения и попробуй снова.');
+          setStatus(resp && resp.message ? resp.message : START_FROM_ACTION_MESSAGE);
         }
       });
     } else {
@@ -127,13 +128,23 @@
   });
 
   // --- Messages from background ---
-  chrome.runtime.onMessage.addListener((msg) => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === 'recordingStarted') {
       setRecording(true, msg.startedAt || Date.now());
     } else if (msg.action === 'recordingStateChanged') {
       syncRecordingState();
     } else if (msg.action === 'transcribing') {
       setStatus('⏳ Транскрибирую запись...', 0);
+      setRecording(false);
+    } else if (msg.action === 'confirmShortRecording') {
+      const seconds = Number(msg.durationSeconds) || 0;
+      const keep = window.confirm(
+        `Запись длилась ${formatDuration(seconds)} — меньше минуты.\n\nСохранить и транскрибировать её?`
+      );
+      sendResponse({ keep });
+      return true;
+    } else if (msg.action === 'recordingDiscarded') {
+      setStatus('Короткая запись удалена.', 4000);
       setRecording(false);
     } else if (msg.action === 'transcriptReady') {
       // Copy to clipboard
@@ -195,7 +206,7 @@
         if (!document.getElementById('tr-yes-btn')) {
           const yes = document.createElement('button');
           yes.id = 'tr-yes-btn';
-          yes.textContent = 'Да, записать';
+          yes.textContent = 'Как начать запись';
           yes.style.cssText = `
             display: block; margin-top: 8px; width: 100%;
             background: #d62d20; color: #fff; border: none;
@@ -217,5 +228,6 @@
   if (window.location.href.includes('/j/')) {
     syncRecordingState();
     startDetectionLoop();
+    setInterval(syncRecordingState, 10000);
   }
 })();

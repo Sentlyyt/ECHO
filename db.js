@@ -51,6 +51,16 @@ async function dbGetMeeting(id) {
   });
 }
 
+async function dbDeleteMeeting(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).delete(id);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = (e) => { db.close(); reject(e.target.error); };
+  });
+}
+
 async function dbGetAllMeetings() {
   const db = await openDB();
   return new Promise((resolve, reject) => {

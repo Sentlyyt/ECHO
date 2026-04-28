@@ -367,7 +367,9 @@ btnRecord.addEventListener('click', () => {
         setStatus('Ошибка', '');
         currentTranscript = '';
         currentPrompt = '';
-        setPromptOutput('Не удалось начать запись. Убедись что открыта вкладка Телемоста.');
+        setPromptOutput(resp && resp.message
+          ? resp.message
+          : 'Запись нужно запускать кликом по иконке ECHO на активной вкладке Телемоста.');
         return;
       }
       applyRecordingState(resp);
@@ -422,6 +424,18 @@ chrome.runtime.onMessage.addListener((msg) => {
     transcriptEl.textContent = `⏳ Транскрибирую часть ${msg.current}${total}...`;
     transcriptEl.className = 'empty';
     setPromptOutput(`⏳ Обрабатываю часть ${msg.current}${total}...`, true);
+  }
+
+  if (msg.action === 'recordingDiscarded') {
+    hideHistoryTranscriptView();
+    applyRecordingState({ recording: false });
+    resetTranscriptView();
+    transcriptCard.style.display = '';
+    transcriptEl.textContent = 'Короткая запись удалена.';
+    transcriptEl.className = 'empty';
+    setStatus('Удалено', '');
+    setPromptOutput('Короткая запись удалена.', true);
+    renderHistory();
   }
 
   if (msg.action === 'retranscribing') {
@@ -594,6 +608,7 @@ btnTranscribeFile.addEventListener('click', async () => {
     resetFileUI();
     uploadStatus.textContent = '✅ Сохранено в историю';
   } catch (e) {
+    console.error('[ECHO/transcribeFile]', e.message, e);
     uploadStatus.textContent = '❌ ' + e.message;
     setStatus('Ошибка', '');
     setPromptOutput('❌ ' + e.message);
@@ -628,6 +643,7 @@ btnExportHistory.addEventListener('click', async () => {
     importStatus.textContent = `✅ Экспортировано ${meetings.length} встреч`;
     setTimeout(() => { importStatus.textContent = ''; }, 3000);
   } catch (e) {
+    console.error('[ECHO/exportHistory]', e.message, e);
     importStatus.textContent = '❌ Не удалось экспортировать историю';
     setTimeout(() => { importStatus.textContent = ''; }, 3000);
   }
@@ -643,7 +659,8 @@ importFileInput.addEventListener('change', async () => {
   try {
     meetings = JSON.parse(await file.text());
     if (!Array.isArray(meetings)) throw new Error();
-  } catch {
+  } catch (e) {
+    console.error('[ECHO/importHistory] failed to parse file:', e.message, e);
     importStatus.textContent = '❌ Не удалось прочитать файл';
     setTimeout(() => { importStatus.textContent = ''; }, 3000);
     return;
@@ -807,10 +824,11 @@ function renderPendingRecordings(meetings) {
   pendingRecordingsCard.style.display = '';
   pendingRecordingsList.innerHTML = pendingMeetings.map(meeting => {
     const chunkCount = Array.isArray(meeting.chunks) ? meeting.chunks.length : 0;
+    const isError = meeting.status === MEETING_STATUS.ERROR;
     const note = meeting.status === MEETING_STATUS.ERROR
       ? (meeting.lastError || 'Транскрибация остановилась с ошибкой')
       : `Сохранено чанков: ${chunkCount}`;
-    const actionLabel = meeting.status === MEETING_STATUS.ERROR ? 'Повторить' : 'Продолжить';
+    const actionLabel = isError ? 'Повторить' : 'Продолжить';
     return `
       <li>
         <div class="pending-info">
@@ -820,7 +838,7 @@ function renderPendingRecordings(meetings) {
             <span class="pending-note">${escapeHtml(note)}</span>
           </div>
         </div>
-        <button class="pending-action" data-id="${escapeAttr(meeting.id)}">${actionLabel}</button>
+        <button class="pending-action${isError ? ' pending-action--error' : ''}" data-id="${escapeAttr(meeting.id)}">${actionLabel}</button>
       </li>`;
   }).join('');
 
@@ -852,8 +870,9 @@ function renderMeetingList(meetings) {
       const previewText = escapeHtml((m.transcript || '').slice(0, 60));
       const displayDate = escapeHtml(m.dateDisplay || m.date || '');
       const title = escapeHtml(getMeetingTitle(m));
+      const isErrorMeeting = m.status === MEETING_STATUS.ERROR;
       const retranscribeBtn = m.chunks && m.chunks.length > 0
-        ? `<button class="btn-retranscribe" data-id="${escapeAttr(m.id)}">↻</button>`
+        ? `<button class="btn-retranscribe${isErrorMeeting ? ' btn-retranscribe--error' : ''}" data-id="${escapeAttr(m.id)}">${isErrorMeeting ? 'Повторить' : '↻'}</button>`
         : '';
       return `
         <li data-id="${escapeAttr(m.id)}">
@@ -866,11 +885,14 @@ function renderMeetingList(meetings) {
               </div>
               <div class="hi-tags-row">
                 ${tagsHtml}
-                <button class="btn-tag-toggle${openPickerId == m.id ? ' open' : ''}" data-id="${escapeAttr(m.id)}" title="Изменить теги">✎</button>
+                <button class="btn-tag-toggle${openPickerId == m.id ? ' open' : ''}" data-id="${escapeAttr(m.id)}" title="Изменить теги">+ тег</button>
               </div>
               <div class="hi-preview">${previewText}${previewText ? '...' : ''}</div>
             </div>
-            ${retranscribeBtn}
+            <div class="hi-actions">
+              ${retranscribeBtn}
+              <button class="btn-delete-meeting" data-id="${escapeAttr(m.id)}" title="Удалить встречу">×</button>
+            </div>
           </div>
           <div class="tag-picker" id="tag-picker-${escapeAttr(m.id)}" style="display:${openPickerId == m.id ? 'block' : 'none'};"></div>
         </li>`;
@@ -902,6 +924,29 @@ function renderMeetingList(meetings) {
       btn.disabled = true;
       btn.textContent = '⏳';
       chrome.runtime.sendMessage({ action: 'retranscribe', meetingId: parseMeetingId(btn.dataset.id) });
+    });
+  });
+
+  // Delete meeting
+  historyList.querySelectorAll('.btn-delete-meeting').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (btn.dataset.confirming) {
+        clearTimeout(btn._resetTimeout);
+        const id = parseMeetingId(btn.dataset.id);
+        if (viewingHistoryTranscript) exitHistoryTranscriptView();
+        await dbDeleteMeeting(id);
+        renderHistory();
+      } else {
+        btn.dataset.confirming = '1';
+        btn.textContent = 'Удалить?';
+        btn.classList.add('confirming');
+        btn._resetTimeout = setTimeout(() => {
+          delete btn.dataset.confirming;
+          btn.textContent = '×';
+          btn.classList.remove('confirming');
+        }, 3000);
+      }
     });
   });
 
@@ -1035,6 +1080,7 @@ async function renderHistory() {
     const q = searchInput.value.toLowerCase().trim();
     renderMeetingList(filterMeetings(allMeetings, q, activeTagFilter));
   } catch (e) {
+    console.error('[ECHO/renderHistory]', e.message, e);
     pendingRecordingsCard.style.display = 'none';
     historyList.innerHTML = '<li class="empty" style="display:block; padding:8px 0;">Не удалось загрузить историю</li>';
   }

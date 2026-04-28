@@ -281,6 +281,11 @@
       border: none; border-radius: 8px; cursor: pointer;
     }
     .pending-action:hover { background: #b52518; opacity: 1; }
+    .pending-action--error {
+      padding: 8px 14px;
+      font-size: 13px;
+      box-shadow: 0 0 0 2px rgba(214, 45, 32, 0.12);
+    }
 
     .btn-retranscribe {
       flex: 0 0 auto; font-size: 11px; font-weight: 600;
@@ -290,6 +295,14 @@
     }
     .btn-retranscribe:hover { background: #e0e0e0; }
     .btn-retranscribe:disabled { opacity: 0.4; cursor: default; }
+    .btn-retranscribe--error {
+      padding: 6px 10px;
+      background: #d62d20;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .btn-retranscribe--error:hover { background: #b52518; opacity: 1; }
 
     /* ── Tag pills in history ── */
     .hi-tags-row {
@@ -304,11 +317,11 @@
     }
 
     .btn-tag-toggle {
-      flex: 0 0 auto; width: auto; padding: 2px 6px;
-      font-size: 11px; font-weight: 700;
+      flex: 0 0 auto; width: auto; padding: 3px 8px;
+      font-size: 10px; font-weight: 700;
       background: #f0f0f0; color: #888;
       border: none; border-radius: 8px; cursor: pointer;
-      transition: background 0.15s;
+      white-space: nowrap; transition: background 0.15s;
     }
     .btn-tag-toggle:hover { background: #e0e0e0; opacity: 1; }
     .btn-tag-toggle.open { background: #d62d20; color: #fff; }
@@ -475,6 +488,26 @@
       font-size: 11px; color: #aaa; line-height: 1.5; margin-top: 12px;
       padding-top: 10px; border-top: 1px solid #f0f0f0;
     }
+
+    /* ── Delete meeting button ── */
+    .hi-actions {
+      display: flex; flex-direction: column; align-items: flex-end;
+      gap: 4px; flex: 0 0 auto;
+    }
+
+    .btn-delete-meeting {
+      flex: none; width: auto; padding: 3px 7px;
+      font-size: 15px; font-weight: 400; line-height: 1;
+      background: none; color: #ccc;
+      border: 1.5px solid #e5e5ea; border-radius: 6px;
+      cursor: pointer; transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+    .btn-delete-meeting:hover { color: #d62d20; border-color: #d62d20; opacity: 1; }
+    .btn-delete-meeting.confirming {
+      background: #d62d20; color: #fff; border-color: #d62d20;
+      font-size: 11px; font-weight: 700; padding: 4px 7px;
+    }
+    .btn-delete-meeting.confirming:hover { background: #b52518; opacity: 1; }
 
     /* ── Toast ── */
     .copied-toast {

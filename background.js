@@ -7,6 +7,55 @@ let currentMeetingId = null;
 let recordingStartedAt = null;
 
 let panelWindowId = null;
+let startRecordingPending = false;
+const actionInvokedTabs = new Map();
+
+const TELEMOST_HOSTS = new Set(['telemost.yandex.ru', 'telemost.yandex.com']);
+const START_FROM_ACTION_MESSAGE = 'Запись нужно запускать кликом по иконке ECHO на активной вкладке Телемоста.';
+const OPEN_MEETING_MESSAGE = 'Открой активную страницу встречи Телемоста: telemost.yandex.ru/j/... или telemost.yandex.com/j/...';
+const SHORT_RECORDING_THRESHOLD_MS = 60 * 1000;
+const EMPTY_RECORDING_TRANSCRIPT = 'Запись пуста';
+
+// ── SW startup: recover any meetings stuck in RECORDING status ──
+(async () => {
+  await configureSidePanel();
+  await recoverStalledMeetings();
+})();
+
+function persistRecordingState() {
+  chrome.storage.session.set({
+    recordingState: { isRecording, currentMeetingId, activeTabId, recordingStartedAt }
+  });
+}
+
+function clearPersistedRecordingState() {
+  chrome.storage.session.remove('recordingState');
+}
+
+async function recoverStalledMeetings() {
+  try {
+    const meetings = await dbGetAllMeetings();
+    const stalled = meetings.filter(m => m.status === MEETING_STATUS.RECORDING);
+    for (const m of stalled) {
+      await dbSaveMeeting({
+        ...m,
+        status: MEETING_STATUS.ERROR,
+        lastError: 'Запись прервалась — браузер или расширение перезапустились.',
+        updatedAt: Date.now()
+      });
+    }
+    if (stalled.length > 0) emitHistoryUpdated();
+  } catch (e) {
+    logError('recoverStalledMeetings', e);
+  }
+}
+
+function logError(tag, error) {
+  const msg = error instanceof Error ? error.message
+    : (error && typeof error === 'object' && error.message) ? error.message
+    : String(error);
+  console.error(`[ECHO/${tag}]`, msg, error);
+}
 
 const MEETING_STATUS = {
   RECORDING: 'Идёт запись',
@@ -16,15 +65,61 @@ const MEETING_STATUS = {
   ERROR: 'Ошибка'
 };
 
-// Open side panel when user clicks the extension icon
 chrome.action.onClicked.addListener((tab) => {
-  if (chrome.sidePanel) {
-    chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true });
-    chrome.sidePanel.open({ tabId: tab.id });
-  } else {
+  const tabId = tab && tab.id;
+  if (tabId && isAllowedTelemostMeetingUrl(tab.url)) {
+    markActionInvoked(tabId, tab.url);
+    openOptionalPanel(tab);
+    return;
+  }
+
+  openOptionalPanel(tab || null);
+});
+
+async function configureSidePanel() {
+  if (!hasSidePanelApi()) return false;
+
+  try {
+    if (typeof chrome.sidePanel.setOptions === 'function') {
+      await chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true });
+    }
+    if (typeof chrome.sidePanel.setPanelBehavior === 'function') {
+      await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    }
+    return true;
+  } catch (e) {
+    logError('configureSidePanel', e);
+    return false;
+  }
+}
+
+function hasSidePanelApi() {
+  return !!(
+    chrome.sidePanel &&
+    typeof chrome.sidePanel.setOptions === 'function' &&
+    typeof chrome.sidePanel.open === 'function'
+  );
+}
+
+async function openOptionalPanel(tab = null) {
+  if (!hasSidePanelApi()) {
+    openPanelWindow();
+    return;
+  }
+
+  try {
+    await chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true });
+    const windowId = tab && typeof tab.windowId === 'number' ? tab.windowId : null;
+    if (windowId === null) {
+      openPanelWindow();
+      return;
+    }
+    await chrome.sidePanel.open({ windowId });
+  } catch (e) {
+    logError('openOptionalPanel/sidePanelFallback', e);
     openPanelWindow();
   }
-});
+}
 
 function openPanelWindow() {
   if (panelWindowId !== null) {
@@ -63,12 +158,86 @@ chrome.windows.onRemoved.addListener((windowId) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  actionInvokedTabs.delete(tabId);
   if (tabId === activeTabId && isRecording) {
     isRecording = false;
     chrome.runtime.sendMessage({ action: 'stopCapture', tabClosed: true });
     broadcastRecordingStateChanged();
   }
 });
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url) actionInvokedTabs.delete(tabId);
+});
+
+function isAllowedTelemostMeetingUrl(url) {
+  try {
+    const parsed = new URL(url || '');
+    return parsed.protocol === 'https:' &&
+      TELEMOST_HOSTS.has(parsed.hostname) &&
+      /^\/j\/[^/]+/.test(parsed.pathname);
+  } catch (e) {
+    return false;
+  }
+}
+
+function markActionInvoked(tabId, url) {
+  actionInvokedTabs.set(tabId, { url, at: Date.now() });
+}
+
+function hasActionInvocation(tabId) {
+  return actionInvokedTabs.has(tabId);
+}
+
+function startFailure(reason, message, extra = {}) {
+  return { success: false, reason, message, ...extra };
+}
+
+function getTab(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(tab);
+    });
+  });
+}
+
+function getActiveTab() {
+  return new Promise((resolve) => {
+    chrome.windows.getLastFocused({ windowTypes: ['normal'] }, (win) => {
+      if (chrome.runtime.lastError || !win) {
+        chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+          resolve(tabs && tabs[0] ? tabs[0] : null);
+        });
+        return;
+      }
+      chrome.tabs.query({ active: true, windowId: win.id }, (tabs) => {
+        resolve(tabs && tabs[0] ? tabs[0] : null);
+      });
+    });
+  });
+}
+
+function getTabCaptureStreamId(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (id) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(id);
+    });
+  });
+}
+
+function normalizeStartRecordingError(error) {
+  if (error && error.echoStartFailure) return error.echoStartFailure;
+
+  const rawMessage = error instanceof Error ? error.message : String(error || '');
+  const needsAction = /not been invoked|activeTab|active tab|permission|not allowed|Cannot access/i.test(rawMessage);
+  if (needsAction) {
+    return startFailure('action_required', START_FROM_ACTION_MESSAGE, { tabCaptureMessage: rawMessage });
+  }
+
+  return startFailure('tab_capture_failed', `Не удалось получить аудио вкладки: ${rawMessage}`, { tabCaptureMessage: rawMessage });
+}
 
 function getRecordingStatePayload(senderTabId = null) {
   return {
@@ -91,7 +260,11 @@ function broadcastRecordingStateChanged() {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'startRecording') {
     const tabId = sender.tab ? sender.tab.id : activeTabId;
-    startRecording(tabId).then(sendResponse);
+    startRecording(tabId, {
+      source: 'generic',
+      tab: sender.tab,
+      requireActionInvocation: true
+    }).then(sendResponse);
     return true;
   }
 
@@ -104,18 +277,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'startRecordingFromPanel') {
-    chrome.tabs.query({ url: ['https://telemost.yandex.ru/*', 'https://telemost.yandex.com/*'] }, (tabs) => {
-      if (!tabs || tabs.length === 0) { sendResponse({ success: false }); return; }
-      const targetTab = tabs.find(tab => tab.active) || tabs[0];
-      startRecording(targetTab.id).then(sendResponse);
+    getActiveTab().then((targetTab) => {
+      if (!targetTab || !isAllowedTelemostMeetingUrl(targetTab.url)) {
+        sendResponse(startFailure('not_telemost_meeting', OPEN_MEETING_MESSAGE));
+        return;
+      }
+      startRecording(targetTab.id, {
+        source: 'panel',
+        tab: targetTab
+      }).then(sendResponse);
     });
     return true;
   }
 
   if (message.action === 'startRecordingFromOverlay') {
     const tabId = sender.tab && sender.tab.id;
-    if (!tabId) { sendResponse({ success: false, reason: 'no_tab' }); return true; }
-    startRecording(tabId).then(sendResponse);
+    if (!tabId) {
+      sendResponse(startFailure('no_tab', 'Не найдена вкладка Телемоста для записи.'));
+      return true;
+    }
+    if (!hasActionInvocation(tabId)) {
+      sendResponse(startFailure('action_required', START_FROM_ACTION_MESSAGE));
+      return true;
+    }
+    startRecording(tabId, {
+      source: 'overlay',
+      tab: sender.tab,
+      requireActionInvocation: true
+    }).then(sendResponse);
     return true;
   }
 
@@ -169,8 +358,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'recorderHeartbeat') {
+    // Intentionally empty — receiving this message is enough to keep the SW alive.
+    return;
+  }
+
   if (message.action === 'audioData') {
+    if (message.meetingId && message.meetingId !== currentMeetingId) {
+      console.warn(`[ECHO/audioData] stale chunk ignored`, { received: message.meetingId, current: currentMeetingId });
+      return;
+    }
     if (message.error || !message.data) {
+      logError('audioData', message.error || 'no audio data received');
       isRecording = false;
       activeTabId = null;
       if (currentMeetingId) {
@@ -186,7 +385,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       currentMeetingId = null;
       recordingStartedAt = null;
+      clearPersistedRecordingState();
       broadcastRecordingStateChanged();
+      closeOffscreen();
       notifyError(message.error || 'Не удалось захватить аудио встречи.', message.tabId, message.tabClosed || false);
       return;
     }
@@ -201,7 +402,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function startRecording(tabId) {
+async function startRecording(tabId, options = {}) {
   if (isRecording) {
     return {
       success: true,
@@ -209,24 +410,34 @@ async function startRecording(tabId) {
     };
   }
 
-  if (!tabId) return { success: false };
-  const key = await getGroqKey();
-  if (!key) return { success: false };
+  if (startRecordingPending) {
+    return startFailure('start_pending', 'Запись уже запускается.');
+  }
+
+  if (!tabId) return startFailure('no_tab', 'Не найдена активная вкладка для записи.');
+
+  const tab = options.tab || await getTab(tabId).catch(() => null);
+  if (!tab || !isAllowedTelemostMeetingUrl(tab.url)) {
+    return startFailure('not_telemost_meeting', OPEN_MEETING_MESSAGE);
+  }
+
+  if (options.requireActionInvocation && !hasActionInvocation(tabId)) {
+    return startFailure('action_required', START_FROM_ACTION_MESSAGE);
+  }
+
+  startRecordingPending = true;
   try {
-    const streamId = await new Promise((resolve, reject) => {
-      chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (id) => {
-        if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
-        else resolve(id);
-      });
-    });
+    const streamId = await getTabCaptureStreamId(tabId);
+    const key = await getGroqKey();
+    if (!key) return startFailure('missing_api_key', 'Groq API ключ не настроен. Открой ECHO и добавь ключ Groq.');
     await ensureOffscreen();
-    await new Promise(r => setTimeout(r, 300));
     activeTabId = tabId;
     currentMeetingId = Date.now();
     recordingStartedAt = Date.now();
     await dbSaveMeeting(buildRecordingMeeting(currentMeetingId));
-    chrome.runtime.sendMessage({ action: 'startCapture', streamId, tabId });
+    chrome.runtime.sendMessage({ action: 'startCapture', streamId, tabId, meetingId: currentMeetingId });
     isRecording = true;
+    persistRecordingState();
     emitHistoryUpdated();
     broadcastRecordingStateChanged();
     chrome.runtime.sendMessage({ action: 'recordingStarted', startedAt: recordingStartedAt }).catch(() => {});
@@ -236,26 +447,48 @@ async function startRecording(tabId) {
       ...getRecordingStatePayload()
     };
   } catch (e) {
-    console.error('startRecording error:', e);
+    logError('startRecording', e);
     activeTabId = null;
     currentMeetingId = null;
     recordingStartedAt = null;
-    return { success: false };
+    return normalizeStartRecordingError(e);
+  } finally {
+    startRecordingPending = false;
+  }
+}
+
+async function closeOffscreen() {
+  try {
+    const existing = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+    if (existing.length > 0) await chrome.offscreen.closeDocument();
+  } catch (e) {
+    logError('closeOffscreen', e);
   }
 }
 
 async function ensureOffscreen() {
   try {
     const existing = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
-    if (existing.length === 0) {
-      await chrome.offscreen.createDocument({
+    if (existing.length > 0) return;
+
+    await new Promise((resolve, reject) => {
+      const listener = (message) => {
+        if (message.action !== 'offscreenReady') return;
+        chrome.runtime.onMessage.removeListener(listener);
+        resolve();
+      };
+      chrome.runtime.onMessage.addListener(listener);
+      chrome.offscreen.createDocument({
         url: 'offscreen.html',
         reasons: ['USER_MEDIA'],
         justification: 'Capture tab audio for transcription'
+      }).catch((e) => {
+        chrome.runtime.onMessage.removeListener(listener);
+        reject(e);
       });
-    }
+    });
   } catch (e) {
-    console.error('ensureOffscreen error:', e);
+    logError('ensureOffscreen', e);
   }
 }
 
@@ -275,6 +508,26 @@ async function handleAudioData(base64Data, tabId, tabClosed = false, chunkIndex 
     const meeting = await dbGetMeeting(meetingId);
     if (!meeting) throw new Error('Не удалось прочитать запись из локального хранилища.');
 
+    if (isFinal && isShortRecording(meeting)) {
+      const shouldKeep = await confirmShortRecording(tabId, tabClosed, meeting);
+      if (!shouldKeep) {
+        await discardMeeting(meetingId);
+        isRecording = false;
+        activeTabId = null;
+        currentMeetingId = null;
+        recordingStartedAt = null;
+        clearPersistedRecordingState();
+        broadcastRecordingStateChanged();
+        await closeOffscreen();
+        emitHistoryUpdated();
+        chrome.runtime.sendMessage({ action: 'recordingDiscarded', meetingId }).catch(() => {});
+        if (tabId && !tabClosed) {
+          chrome.tabs.sendMessage(tabId, { action: 'recordingDiscarded' }).catch(() => {});
+        }
+        return;
+      }
+    }
+
     const chunkEntry = {
       index: Number(chunkIndex),
       data: base64Data,
@@ -292,6 +545,16 @@ async function handleAudioData(base64Data, tabId, tabClosed = false, chunkIndex 
     });
     emitHistoryUpdated();
   } catch (e) {
+    logError('handleAudioData', e);
+    if (isFinal) {
+      isRecording = false;
+      activeTabId = null;
+      currentMeetingId = null;
+      recordingStartedAt = null;
+      clearPersistedRecordingState();
+      broadcastRecordingStateChanged();
+      closeOffscreen();
+    }
     notifyError(e.message, tabId, tabClosed);
     return;
   }
@@ -302,8 +565,47 @@ async function handleAudioData(base64Data, tabId, tabClosed = false, chunkIndex 
   activeTabId = null;
   currentMeetingId = null;
   recordingStartedAt = null;
+  clearPersistedRecordingState();
   broadcastRecordingStateChanged();
+  await closeOffscreen();
   await transcribeMeeting(meetingId, { tabId, tabClosed, resume: false });
+}
+
+function isShortRecording(meeting) {
+  const startedAt = Number(meeting && meeting.createdAt ? meeting.createdAt : recordingStartedAt);
+  if (!startedAt) return false;
+  return Date.now() - startedAt < SHORT_RECORDING_THRESHOLD_MS;
+}
+
+function confirmShortRecording(tabId, tabClosed, meeting) {
+  if (!tabId || tabClosed) return Promise.resolve(true);
+
+  const durationSeconds = Math.max(0, Math.round((Date.now() - Number(meeting.createdAt || Date.now())) / 1000));
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(
+      tabId,
+      {
+        action: 'confirmShortRecording',
+        durationSeconds,
+        thresholdSeconds: Math.round(SHORT_RECORDING_THRESHOLD_MS / 1000)
+      },
+      (resp) => {
+        if (chrome.runtime.lastError) {
+          resolve(true);
+          return;
+        }
+        resolve(resp && resp.keep !== false);
+      }
+    );
+  });
+}
+
+async function discardMeeting(meetingId) {
+  try {
+    await dbDeleteMeeting(meetingId);
+  } catch (e) {
+    logError('discardMeeting', e);
+  }
 }
 
 async function transcribeMeeting(meetingId, { tabId = null, tabClosed = false, resume = false } = {}) {
@@ -357,6 +659,7 @@ async function transcribeMeeting(meetingId, { tabId = null, tabClosed = false, r
         chunk.transcript = transcript;
         delete chunk.error;
       } catch (e) {
+        logError(`transcribeMeeting/chunk[${i}]`, e);
         chunk.error = e.message;
         workingMeeting = {
           ...workingMeeting,
@@ -380,16 +683,21 @@ async function transcribeMeeting(meetingId, { tabId = null, tabClosed = false, r
       await dbSaveMeeting(workingMeeting);
     }
 
-    const fullTranscript = chunks
+    const fullTranscript = normalizeFinalTranscript(chunks
       .sort((a, b) => Number(a.index) - Number(b.index))
       .map(chunk => chunk.transcript || '')
-      .join('\n\n');
+      .join('\n\n'));
 
     const prompt = buildMeetingPrompt(fullTranscript);
+    const hasMeaningfulTranscript = fullTranscript !== EMPTY_RECORDING_TRANSCRIPT;
     const tags = meeting.tags && meeting.tags.length
       ? meeting.tags
-      : await autoTagMeeting(fullTranscript, apiKey).catch(() => []);
-    const title = await generateMeetingTitle(fullTranscript, apiKey).catch(() => fallbackMeetingTitle(fullTranscript));
+      : hasMeaningfulTranscript
+        ? await autoTagMeeting(fullTranscript, apiKey).catch((e) => { logError('autoTagMeeting', e); return []; })
+        : [];
+    const title = hasMeaningfulTranscript
+      ? await generateMeetingTitle(fullTranscript, apiKey).catch((e) => { logError('generateMeetingTitle', e); return fallbackMeetingTitle(fullTranscript); })
+      : EMPTY_RECORDING_TRANSCRIPT;
 
     const completedMeeting = {
       ...workingMeeting,
@@ -418,6 +726,7 @@ async function transcribeMeeting(meetingId, { tabId = null, tabClosed = false, r
       });
     }
   } catch (e) {
+    logError('transcribeMeeting', e);
     await dbSaveMeeting({
       ...meeting,
       status: MEETING_STATUS.ERROR,
@@ -466,12 +775,11 @@ async function exportMeetingAssets(meeting) {
   const fileBase = buildMeetingFileBase(meeting);
   const chunks = [...(meeting.chunks || [])].sort((a, b) => Number(a.index) - Number(b.index));
 
-  for (let i = 0; i < chunks.length; i++) {
-    if (!chunks[i].data) continue;
-    const suffix = chunks.length > 1 ? `_part${i + 1}` : '';
+  const audioBase64 = combineAudioChunksBase64(chunks);
+  if (audioBase64) {
     chrome.downloads.download({
-      url: `data:audio/webm;base64,${chunks[i].data}`,
-      filename: `${fileBase}${suffix}.webm`,
+      url: `data:audio/webm;base64,${audioBase64}`,
+      filename: `${fileBase}.webm`,
       saveAs: false
     });
   }
@@ -481,6 +789,46 @@ async function exportMeetingAssets(meeting) {
     filename: `${fileBase}.txt`,
     saveAs: false
   });
+}
+
+function combineAudioChunksBase64(chunks) {
+  const audioChunks = chunks
+    .filter(chunk => chunk && chunk.data)
+    .sort((a, b) => Number(a.index) - Number(b.index));
+
+  if (audioChunks.length === 0) return '';
+  if (audioChunks.length === 1) return audioChunks[0].data;
+
+  const bytes = audioChunks.map(chunk => base64ToUint8Array(chunk.data));
+  const totalLength = bytes.reduce((sum, item) => sum + item.length, 0);
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+
+  for (const item of bytes) {
+    combined.set(item, offset);
+    offset += item.length;
+  }
+
+  return uint8ArrayToBase64(combined);
+}
+
+function base64ToUint8Array(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function uint8ArrayToBase64(bytes) {
+  const batchSize = 0x8000;
+  let binary = '';
+
+  for (let i = 0; i < bytes.length; i += batchSize) {
+    const batch = bytes.subarray(i, i + batchSize);
+    binary += String.fromCharCode(...batch);
+  }
+
+  return btoa(binary);
 }
 
 function buildMeetingFileBase(meeting) {
@@ -596,6 +944,105 @@ function formatDate(ts) {
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}`;
 }
 
+// Known Whisper hallucination patterns for Russian audio — filtered out after transcription.
+const WHISPER_HALLUCINATIONS = [
+  /^продолжение следует[.\s…]*/i,
+  /^субтитры\s+(сделаны|добавлены|создаются)[.\s…]*/i,
+  /^субтитры\s+\S+[.\s…]*/i,
+  /^редактор\s+субтитров[.\s…]*/i,
+  /^перевод\s+субтитров[.\s…]*/i,
+  /^корректор[.\s…]*/i,
+];
+
+const GROQ_NETWORK_ERROR_MESSAGE = 'Не удалось подключиться к Groq. Проверь VPN/сеть/доступ к api.groq.com и нажми повторить транскрибацию';
+const GROQ_FETCH_TIMEOUT_MS = 120000;
+const GROQ_RETRY_DELAYS_MS = [1000, 3000, 7000];
+
+function filterWhisperHallucinations(text) {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (isKnownEmptyTranscriptHallucination(normalized)) return '';
+
+  // If the whole text is a repeated hallucination phrase, return empty string.
+  const singlePhrase = normalized.split(/[.,!?…\n]+/).map(s => s.trim()).filter(Boolean);
+  if (singlePhrase.length > 0) {
+    const unique = new Set(singlePhrase.map(s => s.toLowerCase()));
+    // All segments are the same hallucinated phrase → fully hallucinated
+    if (unique.size === 1 && WHISPER_HALLUCINATIONS.some(re => re.test(singlePhrase[0]))) {
+      return '';
+    }
+  }
+  return normalized;
+}
+
+function isKnownEmptyTranscriptHallucination(text) {
+  const normalized = String(text || '')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (/^редактор субтитров(?:\s|$)/.test(normalized) && /(?:^|\s)корректор(?:\s|$)/.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
+function normalizeFinalTranscript(transcript) {
+  const filtered = filterWhisperHallucinations(String(transcript || ''));
+  return filtered || EMPTY_RECORDING_TRANSCRIPT;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetriableGroqError(error) {
+  if (!error) return false;
+  if (error.name === 'AbortError') return true;
+  if (error instanceof TypeError) return true;
+  const message = String(error.message || error);
+  return /Failed to fetch|NetworkError|network|timed out|timeout/i.test(message);
+}
+
+function normalizeGroqFetchError(error) {
+  if (error && error.name === 'AbortError') {
+    return new Error('Groq не ответил вовремя. Подожди пару минут и нажми повторить транскрибацию.');
+  }
+  if (error instanceof TypeError && /Failed to fetch/i.test(error.message || '')) {
+    return new Error(GROQ_NETWORK_ERROR_MESSAGE);
+  }
+  return error instanceof Error ? error : new Error(String(error || 'Неизвестная ошибка сети'));
+}
+
+async function fetchWithRetry(url, options = {}, retryOptions = {}) {
+  const timeoutMs = retryOptions.timeoutMs || GROQ_FETCH_TIMEOUT_MS;
+  const retryDelaysMs = retryOptions.retryDelaysMs || GROQ_RETRY_DELAYS_MS;
+  const maxAttempts = retryOptions.maxAttempts || (retryDelaysMs.length + 1);
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timerId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, {
+        ...options,
+        signal: controller.signal
+      });
+    } catch (error) {
+      lastError = error;
+      const canRetry = attempt < maxAttempts && isRetriableGroqError(error);
+      if (!canRetry) break;
+      await sleep(retryDelaysMs[Math.min(attempt - 1, retryDelaysMs.length - 1)]);
+    } finally {
+      clearTimeout(timerId);
+    }
+  }
+
+  throw normalizeGroqFetchError(lastError);
+}
+
 async function transcribeBase64(base64Data, apiKey) {
   const binary = atob(base64Data);
   const bytes = new Uint8Array(binary.length);
@@ -607,15 +1054,21 @@ async function transcribeBase64(base64Data, apiKey) {
   formData.append('model', 'whisper-large-v3');
   formData.append('language', 'ru');
   formData.append('response_format', 'text');
+  formData.append('temperature', '0');
+  formData.append('prompt', 'Деловая встреча. Запись разговора на русском языке.');
 
-  const resp = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+  const resp = await fetchWithRetry('https://api.groq.com/openai/v1/audio/transcriptions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}` },
     body: formData
+  }, {
+    timeoutMs: GROQ_FETCH_TIMEOUT_MS,
+    retryDelaysMs: GROQ_RETRY_DELAYS_MS
   });
 
   if (!resp.ok) throw new Error(`Groq: ${resp.status} — ${await resp.text()}`);
-  return await resp.text();
+  const raw = await resp.text();
+  return filterWhisperHallucinations(raw);
 }
 
 function notifyError(message, tabId, tabClosed) {
