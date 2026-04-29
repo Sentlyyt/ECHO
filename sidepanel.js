@@ -199,6 +199,7 @@ const driveStatusText     = document.getElementById('drive-status-text');
 const driveErrText        = document.getElementById('drive-err-text');
 const btnDriveConnect     = document.getElementById('btn-drive-connect');
 const btnDriveDisconnect  = document.getElementById('btn-drive-disconnect');
+const btnDriveResetAuth   = document.getElementById('btn-drive-reset-auth');
 const driveProgressBanner = document.getElementById('drive-progress-banner');
 const driveNotConfigured  = document.getElementById('drive-not-configured');
 const driveConfiguredBlock = document.getElementById('drive-configured-block');
@@ -274,6 +275,22 @@ btnDriveConnect?.addEventListener('click', () => {
 btnDriveDisconnect?.addEventListener('click', () => {
   chrome.runtime.sendMessage({ action: 'disconnectDrive' }, () => {
     setDriveStatusUI(false);
+  });
+});
+
+btnDriveResetAuth?.addEventListener('click', () => {
+  if (btnDriveResetAuth.disabled) return;
+  btnDriveResetAuth.disabled = true;
+  btnDriveResetAuth.textContent = 'Сбрасываю...';
+  chrome.runtime.sendMessage({ action: 'resetDriveAuth' }, (resp) => {
+    btnDriveResetAuth.disabled = false;
+    btnDriveResetAuth.textContent = 'Сбросить Google авторизацию';
+    setDriveStatusUI(false);
+    if (driveErrText) {
+      driveErrText.textContent = chrome.runtime.lastError || !resp || !resp.ok
+        ? '❌ Не удалось сбросить авторизацию Google.'
+        : 'Авторизация Google сброшена. Подключите Google Drive заново.';
+    }
   });
 });
 

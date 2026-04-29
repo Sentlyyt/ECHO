@@ -417,6 +417,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'resetDriveAuth') {
+    resetDriveAuth().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
   if (message.action === 'retryDriveUpload') {
     const retryId = message.meetingId;
     dbGetMeeting(retryId).then(meeting => {
@@ -1071,12 +1076,57 @@ function emitHistoryUpdated() {
 
 // ── Google Drive integration ──
 
+function getDriveAuthDebugInfo() {
+  const manifest = chrome.runtime.getManifest ? chrome.runtime.getManifest() : {};
+  return {
+    extensionId: chrome.runtime.id,
+    clientId: manifest.oauth2?.client_id || '',
+    scopes: manifest.oauth2?.scopes || []
+  };
+}
+
+function logDriveAuthDiagnostic(context, lastErrorMessage = '') {
+  const info = getDriveAuthDebugInfo();
+  console.warn(`[ECHO/GoogleDriveOAuth] ${context}`, {
+    extensionId: info.extensionId,
+    oauthClientId: info.clientId,
+    oauthScopes: info.scopes,
+    lastErrorMessage
+  });
+}
+
+function formatDriveAuthError(message) {
+  const raw = String(message || '').trim();
+  const lower = raw.toLowerCase();
+
+  if (lower.includes('invalid_client')) {
+    return 'OAuth Client ID не совпадает с ID расширения.';
+  }
+  if (lower.includes('oauth2 not granted') || lower.includes('bad client id')) {
+    return 'Проверьте client_id в manifest.json.';
+  }
+  if (lower.includes('access_denied')) {
+    return 'Доступ не был разрешён.';
+  }
+  if (lower.includes('canceled') || lower.includes('cancelled')) {
+    return 'Авторизация Google Drive была отменена или окно входа не завершилось. Попробуйте ещё раз.';
+  }
+
+  return raw || 'Не удалось подключить Google Drive.';
+}
+
 async function getDriveToken(interactive) {
   return new Promise((resolve, reject) => {
+    logDriveAuthDiagnostic(`getAuthToken start, interactive=${interactive}`);
     chrome.identity.getAuthToken({ interactive }, (token) => {
       if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
+        const lastErrorMessage = chrome.runtime.lastError.message || '';
+        logDriveAuthDiagnostic(`getAuthToken failed, interactive=${interactive}`, lastErrorMessage);
+        const error = new Error(formatDriveAuthError(lastErrorMessage));
+        error.rawMessage = lastErrorMessage;
+        reject(error);
       } else {
+        logDriveAuthDiagnostic(`getAuthToken ok, interactive=${interactive}`);
         resolve(token || null);
       }
     });
@@ -1095,21 +1145,84 @@ async function checkDriveConnected() {
 async function connectDriveInteractive() {
   try {
     const token = await getDriveToken(true);
-    if (!token) return { ok: false, error: 'Авторизация отменена' };
+    if (!token) {
+      return {
+        ok: false,
+        error: 'Авторизация Google Drive была отменена или окно входа не завершилось. Попробуйте ещё раз.'
+      };
+    }
+    await verifyDriveToken(token);
     return { ok: true };
   } catch (e) {
+    logDriveAuthDiagnostic('connectDriveInteractive failed', e.rawMessage || e.message);
     return { ok: false, error: e.message };
   }
 }
 
+async function verifyDriveToken(token) {
+  const aboutResp = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (aboutResp.ok) return true;
+
+  const aboutError = await aboutResp.text().catch(() => '');
+  console.warn('[ECHO/GoogleDriveOAuth] Drive about.get failed, trying ECHO Recordings folder check', {
+    status: aboutResp.status,
+    body: aboutError
+  });
+
+  await ensureEchoRecordingsFolder(token);
+  return true;
+}
+
+async function ensureEchoRecordingsFolder(token) {
+  const query = encodeURIComponent("name = 'ECHO Recordings' and mimeType = 'application/vnd.google-apps.folder' and trashed = false");
+  const listResp = await fetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)&pageSize=1`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (listResp.ok) {
+    const data = await listResp.json().catch(() => ({}));
+    if (Array.isArray(data.files) && data.files.length > 0) return data.files[0];
+  } else {
+    console.warn('[ECHO/GoogleDriveOAuth] Drive folder lookup failed', {
+      status: listResp.status,
+      body: await listResp.text().catch(() => '')
+    });
+  }
+
+  return await createDriveFolder('ECHO Recordings', token);
+}
+
 async function disconnectDrive() {
   return new Promise((resolve) => {
+    logDriveAuthDiagnostic('disconnectDrive getAuthToken start, interactive=false');
     chrome.identity.getAuthToken({ interactive: false }, (token) => {
-      if (chrome.runtime.lastError || !token) { resolve(); return; }
+      if (chrome.runtime.lastError || !token) {
+        if (chrome.runtime.lastError) {
+          logDriveAuthDiagnostic('disconnectDrive getAuthToken failed', chrome.runtime.lastError.message || '');
+        }
+        resolve();
+        return;
+      }
+      logDriveAuthDiagnostic('disconnectDrive getAuthToken ok');
       chrome.identity.removeCachedAuthToken({ token }, () => {
         fetch(`https://accounts.google.com/o/oauth2/revoke?token=${token}`)
           .catch(() => {}).finally(resolve);
       });
+    });
+  });
+}
+
+async function resetDriveAuth() {
+  logDriveAuthDiagnostic('clearAllCachedAuthTokens requested');
+  return new Promise((resolve) => {
+    chrome.identity.clearAllCachedAuthTokens(() => {
+      if (chrome.runtime.lastError) {
+        logDriveAuthDiagnostic('clearAllCachedAuthTokens failed', chrome.runtime.lastError.message || '');
+      } else {
+        logDriveAuthDiagnostic('clearAllCachedAuthTokens ok');
+      }
+      resolve();
     });
   });
 }
