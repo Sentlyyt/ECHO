@@ -1,4 +1,5 @@
 // background.js — service worker
+importScripts('googleDriveConfig.js');
 importScripts('db.js');
 
 let activeTabId = null;
@@ -1080,13 +1081,43 @@ const DRIVE_FALLBACK_TOKEN_KEY = 'driveFallbackOAuthToken';
 const DRIVE_FALLBACK_NOTICE = 'Похоже, вы используете не Google Chrome. Откроем альтернативную авторизацию Google Drive.';
 const DRIVE_FALLBACK_ERROR = 'В этом браузере Google Drive OAuth может не поддерживаться. Попробуйте Google Chrome или подключите Drive через Chrome.';
 
+function getGoogleDriveOAuthConfig() {
+  const config = globalThis.GOOGLE_DRIVE_OAUTH_CONFIG || {};
+  return {
+    chromeExtensionClientId: String(config.chromeExtensionClientId || '').trim(),
+    yandexWebClientId: String(config.yandexWebClientId || '').trim(),
+    scope: String(config.scope || 'https://www.googleapis.com/auth/drive.file').trim()
+  };
+}
+
+function detectBrowser() {
+  const ua = navigator.userAgent || '';
+  if (/YaBrowser\//i.test(ua)) return 'yandex';
+  if (/Edg\//i.test(ua)) return 'edge';
+  if (/OPR\//i.test(ua) || /Opera/i.test(ua)) return 'opera';
+  if (/Chrome\//i.test(ua)) return 'chrome';
+  if (/Chromium\//i.test(ua) || /Chrome\//i.test(ua)) return 'chromium';
+  return 'unknown';
+}
+
+function isGoogleChromeBrowser() {
+  return detectBrowser() === 'chrome';
+}
+
 function getDriveAuthDebugInfo() {
   const manifest = chrome.runtime.getManifest ? chrome.runtime.getManifest() : {};
+  const config = getGoogleDriveOAuthConfig();
+  const manifestClientId = manifest.oauth2?.client_id || '';
   return {
+    detectedBrowser: detectBrowser(),
     userAgent: navigator.userAgent,
     extensionId: chrome.runtime.id,
-    clientId: manifest.oauth2?.client_id || '',
+    clientId: manifestClientId,
+    chromeExtensionClientId: config.chromeExtensionClientId,
+    yandexWebClientId: config.yandexWebClientId,
+    chromeClientIdMatchesManifest: !config.chromeExtensionClientId || config.chromeExtensionClientId === manifestClientId,
     scopes: manifest.oauth2?.scopes || [],
+    configuredScope: config.scope,
     redirectUrl: chrome.identity.getRedirectURL()
   };
 }
@@ -1094,10 +1125,15 @@ function getDriveAuthDebugInfo() {
 function logDriveAuthDiagnostic(context, lastErrorMessage = '') {
   const info = getDriveAuthDebugInfo();
   console.warn(`[ECHO/GoogleDriveOAuth] ${context}`, {
+    detectedBrowser: info.detectedBrowser,
     userAgent: info.userAgent,
     extensionId: info.extensionId,
     oauthClientId: info.clientId,
+    configChromeExtensionClientId: info.chromeExtensionClientId,
+    configYandexWebClientId: info.yandexWebClientId,
+    chromeClientIdMatchesManifest: info.chromeClientIdMatchesManifest,
     oauthScopes: info.scopes,
+    configuredScope: info.configuredScope,
     redirectUrl: info.redirectUrl,
     lastErrorMessage
   });
@@ -1133,6 +1169,10 @@ async function getDriveToken(interactive) {
   if (fallbackToken) {
     logDriveAuthDiagnostic('using stored launchWebAuthFlow token');
     return fallbackToken;
+  }
+
+  if (interactive && !isGoogleChromeBrowser()) {
+    return await launchDriveWebAuthFlow();
   }
 
   return new Promise((resolve, reject) => {
@@ -1182,16 +1222,18 @@ async function getStoredDriveFallbackToken() {
 
 function saveDriveFallbackToken(accessToken, expiresIn) {
   const ttlMs = Math.max(1, Number(expiresIn) || 3600) * 1000;
-  return chrome.storage.local.set({
-    [DRIVE_FALLBACK_TOKEN_KEY]: {
-      accessToken,
-      expiresAt: Date.now() + ttlMs
-    }
+  return new Promise(resolve => {
+    chrome.storage.local.set({
+      [DRIVE_FALLBACK_TOKEN_KEY]: {
+        accessToken,
+        expiresAt: Date.now() + ttlMs
+      }
+    }, resolve);
   });
 }
 
 function clearStoredDriveFallbackToken() {
-  return chrome.storage.local.remove(DRIVE_FALLBACK_TOKEN_KEY);
+  return new Promise(resolve => chrome.storage.local.remove(DRIVE_FALLBACK_TOKEN_KEY, resolve));
 }
 
 async function launchDriveWebAuthFlow() {
@@ -1199,16 +1241,16 @@ async function launchDriveWebAuthFlow() {
   chrome.runtime.sendMessage({ action: 'driveAuthFallbackStarted', message: DRIVE_FALLBACK_NOTICE }).catch(() => {});
 
   const info = getDriveAuthDebugInfo();
-  if (!info.clientId || !info.clientId.endsWith('.apps.googleusercontent.com')) {
-    throw new Error('Проверьте client_id в manifest.json.');
+  if (!info.yandexWebClientId || !info.yandexWebClientId.endsWith('.apps.googleusercontent.com') || info.yandexWebClientId.includes('REPLACE_WITH')) {
+    throw new Error('Добавьте Web application client_id для Яндекс.Браузера в googleDriveConfig.js.');
   }
 
   const state = Math.random().toString(36).slice(2);
   const params = new URLSearchParams({
-    client_id: info.clientId,
+    client_id: info.yandexWebClientId,
     response_type: 'token',
     redirect_uri: info.redirectUrl,
-    scope: info.scopes.join(' '),
+    scope: info.configuredScope,
     include_granted_scopes: 'true',
     prompt: 'consent',
     state

@@ -15,7 +15,27 @@
 
 > Google Drive не настроен в этой сборке расширения. Обратитесь к разработчику.
 
-## Настройка OAuth для Chrome Extension
+## Два OAuth client_id
+
+ECHO использует два разных OAuth Client:
+
+1. **Chrome Extension OAuth client_id** - для Google Chrome и `chrome.identity.getAuthToken`.
+2. **Web application OAuth client_id** - для Яндекс.Браузера и fallback через `chrome.identity.launchWebAuthFlow`.
+
+В `manifest.json` можно указать только один OAuth client_id. Поэтому:
+
+- Chrome Extension client_id лежит в `manifest.json` -> `oauth2.client_id`;
+- этот же Chrome Extension client_id дублируется в `googleDriveConfig.js` -> `chromeExtensionClientId`, чтобы диагностика могла проверить совпадение;
+- Web application client_id лежит только в `googleDriveConfig.js` -> `yandexWebClientId`;
+- Web application client_id нельзя класть в `manifest.json`.
+
+`scope` везде один:
+
+```text
+https://www.googleapis.com/auth/drive.file
+```
+
+## Настройка OAuth для Google Chrome
 
 1. Открой `chrome://extensions`.
 2. Включи режим разработчика.
@@ -28,7 +48,8 @@
 9. Вставь Extension ID в поле Item ID.
 10. Скопируй `client_id`.
 11. Вставь `client_id` в `manifest.json` в `oauth2.client_id`.
-12. Убедись, что в `oauth2.scopes` указан только scope `https://www.googleapis.com/auth/drive.file`.
+12. Вставь тот же `client_id` в `googleDriveConfig.js` в `chromeExtensionClientId`.
+13. Убедись, что в `oauth2.scopes` указан только scope `https://www.googleapis.com/auth/drive.file`.
 
 Пример:
 
@@ -39,7 +60,49 @@
 }
 ```
 
+```js
+globalThis.GOOGLE_DRIVE_OAUTH_CONFIG = {
+  chromeExtensionClientId: '123456789-abc...xyz.apps.googleusercontent.com',
+  yandexWebClientId: 'PASTE_WEB_CLIENT_ID_HERE.apps.googleusercontent.com',
+  scope: 'https://www.googleapis.com/auth/drive.file'
+};
+```
+
 Не используй полный scope Google Drive. Для ECHO нужен только `drive.file`: расширение сможет создавать и читать только файлы, созданные самим приложением.
+
+## Настройка OAuth для Яндекс.Браузера
+
+Яндекс.Браузер может возвращать `canceled` на `chrome.identity.getAuthToken`, потому что у него нет полной Google Chrome identity-интеграции. Для него ECHO использует `launchWebAuthFlow`.
+
+1. В Google Cloud Console открой тот же проект.
+2. Перейди в APIs & Services -> Credentials.
+3. Создай OAuth Client типа **Web application**.
+4. В поле **Authorized redirect URIs** добавь URL из debug-лога ECHO:
+
+```text
+chrome.identity.getRedirectURL()
+```
+
+Он выглядит примерно так:
+
+```text
+https://<extension-id>.chromiumapp.org/
+```
+
+5. Скопируй Web application `client_id`.
+6. Вставь его в `googleDriveConfig.js` в `yandexWebClientId`.
+
+Пример:
+
+```js
+globalThis.GOOGLE_DRIVE_OAUTH_CONFIG = {
+  chromeExtensionClientId: '123456789-chrome-extension.apps.googleusercontent.com',
+  yandexWebClientId: '123456789-web-application.apps.googleusercontent.com',
+  scope: 'https://www.googleapis.com/auth/drive.file'
+};
+```
+
+Refresh token в расширении не сохраняется. Fallback использует short-lived `access_token`; когда он истечет, пользователь пройдет авторизацию заново.
 
 ## Unpacked extension и стабильный Extension ID
 
