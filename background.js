@@ -1076,23 +1076,36 @@ function emitHistoryUpdated() {
 
 // ── Google Drive integration ──
 
+const DRIVE_FALLBACK_TOKEN_KEY = 'driveFallbackOAuthToken';
+const DRIVE_FALLBACK_NOTICE = 'Похоже, вы используете не Google Chrome. Откроем альтернативную авторизацию Google Drive.';
+const DRIVE_FALLBACK_ERROR = 'В этом браузере Google Drive OAuth может не поддерживаться. Попробуйте Google Chrome или подключите Drive через Chrome.';
+
 function getDriveAuthDebugInfo() {
   const manifest = chrome.runtime.getManifest ? chrome.runtime.getManifest() : {};
   return {
+    userAgent: navigator.userAgent,
     extensionId: chrome.runtime.id,
     clientId: manifest.oauth2?.client_id || '',
-    scopes: manifest.oauth2?.scopes || []
+    scopes: manifest.oauth2?.scopes || [],
+    redirectUrl: chrome.identity.getRedirectURL()
   };
 }
 
 function logDriveAuthDiagnostic(context, lastErrorMessage = '') {
   const info = getDriveAuthDebugInfo();
   console.warn(`[ECHO/GoogleDriveOAuth] ${context}`, {
+    userAgent: info.userAgent,
     extensionId: info.extensionId,
     oauthClientId: info.clientId,
     oauthScopes: info.scopes,
+    redirectUrl: info.redirectUrl,
     lastErrorMessage
   });
+}
+
+function isCanceledDriveAuthError(message) {
+  const lower = String(message || '').toLowerCase();
+  return lower.includes('canceled') || lower.includes('cancelled');
 }
 
 function formatDriveAuthError(message) {
@@ -1116,21 +1129,147 @@ function formatDriveAuthError(message) {
 }
 
 async function getDriveToken(interactive) {
+  const fallbackToken = await getStoredDriveFallbackToken();
+  if (fallbackToken) {
+    logDriveAuthDiagnostic('using stored launchWebAuthFlow token');
+    return fallbackToken;
+  }
+
   return new Promise((resolve, reject) => {
     logDriveAuthDiagnostic(`getAuthToken start, interactive=${interactive}`);
     chrome.identity.getAuthToken({ interactive }, (token) => {
       if (chrome.runtime.lastError) {
         const lastErrorMessage = chrome.runtime.lastError.message || '';
         logDriveAuthDiagnostic(`getAuthToken failed, interactive=${interactive}`, lastErrorMessage);
+        if (interactive && isCanceledDriveAuthError(lastErrorMessage)) {
+          launchDriveWebAuthFlow()
+            .then(resolve)
+            .catch(reject);
+          return;
+        }
         const error = new Error(formatDriveAuthError(lastErrorMessage));
         error.rawMessage = lastErrorMessage;
         reject(error);
       } else {
         logDriveAuthDiagnostic(`getAuthToken ok, interactive=${interactive}`);
-        resolve(token || null);
+        if (token) {
+          resolve(token);
+          return;
+        }
+        if (interactive) {
+          launchDriveWebAuthFlow()
+            .then(resolve)
+            .catch(reject);
+          return;
+        }
+        resolve(null);
       }
     });
   });
+}
+
+async function getStoredDriveFallbackToken() {
+  const stored = await new Promise(resolve =>
+    chrome.storage.local.get(DRIVE_FALLBACK_TOKEN_KEY, data => resolve(data[DRIVE_FALLBACK_TOKEN_KEY] || null))
+  );
+  if (!stored || !stored.accessToken || !stored.expiresAt) return null;
+  if (Date.now() > Number(stored.expiresAt) - 60000) {
+    await clearStoredDriveFallbackToken();
+    return null;
+  }
+  return stored.accessToken;
+}
+
+function saveDriveFallbackToken(accessToken, expiresIn) {
+  const ttlMs = Math.max(1, Number(expiresIn) || 3600) * 1000;
+  return chrome.storage.local.set({
+    [DRIVE_FALLBACK_TOKEN_KEY]: {
+      accessToken,
+      expiresAt: Date.now() + ttlMs
+    }
+  });
+}
+
+function clearStoredDriveFallbackToken() {
+  return chrome.storage.local.remove(DRIVE_FALLBACK_TOKEN_KEY);
+}
+
+async function launchDriveWebAuthFlow() {
+  logDriveAuthDiagnostic('launchWebAuthFlow fallback start');
+  chrome.runtime.sendMessage({ action: 'driveAuthFallbackStarted', message: DRIVE_FALLBACK_NOTICE }).catch(() => {});
+
+  const info = getDriveAuthDebugInfo();
+  if (!info.clientId || !info.clientId.endsWith('.apps.googleusercontent.com')) {
+    throw new Error('Проверьте client_id в manifest.json.');
+  }
+
+  const state = Math.random().toString(36).slice(2);
+  const params = new URLSearchParams({
+    client_id: info.clientId,
+    response_type: 'token',
+    redirect_uri: info.redirectUrl,
+    scope: info.scopes.join(' '),
+    include_granted_scopes: 'true',
+    prompt: 'consent',
+    state
+  });
+  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+
+  return new Promise((resolve, reject) => {
+    chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true }, async (redirectedTo) => {
+      if (chrome.runtime.lastError) {
+        const lastErrorMessage = chrome.runtime.lastError.message || '';
+        logDriveAuthDiagnostic('launchWebAuthFlow failed', lastErrorMessage);
+        const error = new Error(DRIVE_FALLBACK_ERROR);
+        error.rawMessage = lastErrorMessage;
+        reject(error);
+        return;
+      }
+      if (!redirectedTo) {
+        logDriveAuthDiagnostic('launchWebAuthFlow returned empty redirect URL');
+        reject(new Error(DRIVE_FALLBACK_ERROR));
+        return;
+      }
+
+      try {
+        const tokenData = parseDriveWebAuthRedirect(redirectedTo, state);
+        await saveDriveFallbackToken(tokenData.accessToken, tokenData.expiresIn);
+        logDriveAuthDiagnostic('launchWebAuthFlow token received');
+        resolve(tokenData.accessToken);
+      } catch (e) {
+        logDriveAuthDiagnostic('launchWebAuthFlow token parse failed', e.rawMessage || e.message);
+        reject(e);
+      }
+    });
+  });
+}
+
+function parseDriveWebAuthRedirect(redirectedTo, expectedState) {
+  const url = new URL(redirectedTo);
+  const params = new URLSearchParams(url.hash ? url.hash.slice(1) : url.search.slice(1));
+  const error = params.get('error');
+  if (error) {
+    const err = new Error(error === 'access_denied' ? 'Доступ не был разрешён.' : DRIVE_FALLBACK_ERROR);
+    err.rawMessage = error;
+    throw err;
+  }
+  if (params.get('state') !== expectedState) {
+    const err = new Error(DRIVE_FALLBACK_ERROR);
+    err.rawMessage = 'OAuth state mismatch';
+    throw err;
+  }
+
+  const accessToken = params.get('access_token');
+  if (!accessToken) {
+    const err = new Error(DRIVE_FALLBACK_ERROR);
+    err.rawMessage = 'No access_token in launchWebAuthFlow redirect';
+    throw err;
+  }
+
+  return {
+    accessToken,
+    expiresIn: params.get('expires_in') || 3600
+  };
 }
 
 async function checkDriveConnected() {
@@ -1201,13 +1340,13 @@ async function disconnectDrive() {
         if (chrome.runtime.lastError) {
           logDriveAuthDiagnostic('disconnectDrive getAuthToken failed', chrome.runtime.lastError.message || '');
         }
-        resolve();
+        clearStoredDriveFallbackToken().finally(resolve);
         return;
       }
       logDriveAuthDiagnostic('disconnectDrive getAuthToken ok');
       chrome.identity.removeCachedAuthToken({ token }, () => {
         fetch(`https://accounts.google.com/o/oauth2/revoke?token=${token}`)
-          .catch(() => {}).finally(resolve);
+          .catch(() => {}).finally(() => clearStoredDriveFallbackToken().finally(resolve));
       });
     });
   });
@@ -1222,7 +1361,7 @@ async function resetDriveAuth() {
       } else {
         logDriveAuthDiagnostic('clearAllCachedAuthTokens ok');
       }
-      resolve();
+      clearStoredDriveFallbackToken().finally(resolve);
     });
   });
 }

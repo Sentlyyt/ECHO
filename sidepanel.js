@@ -802,6 +802,10 @@ async function openCurrentMeetingFromHistory() {
 
 // ── Messages from background ──
 chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.action === 'driveAuthFallbackStarted') {
+    if (driveErrText) driveErrText.textContent = msg.message || 'Открываем альтернативную авторизацию Google Drive.';
+  }
+
   if (msg.action === 'historyUpdated') {
     renderHistory();
   }
