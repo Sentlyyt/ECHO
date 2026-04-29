@@ -15,6 +15,16 @@ const START_FROM_ACTION_MESSAGE = 'Запись нужно запускать к
 const OPEN_MEETING_MESSAGE = 'Открой активную страницу встречи Телемоста: telemost.yandex.ru/j/... или telemost.yandex.com/j/...';
 const SHORT_RECORDING_THRESHOLD_MS = 60 * 1000;
 const EMPTY_RECORDING_TRANSCRIPT = 'Запись пуста';
+const SUMMARY_PROMPT_STORAGE_KEY = 'summaryBasePrompt';
+const DEFAULT_SUMMARY_PROMPT = `Сделай саммари деловой встречи на русском языке.
+
+Структура:
+1. Краткое резюме на 3-5 предложений.
+2. Ключевые решения и договоренности.
+3. Задачи: что сделать, кто отвечает, срок, если он есть.
+4. Важные риски, вопросы и открытые хвосты.
+
+Пиши конкретно, без воды. Если в транскрипте нет данных для пункта, так и напиши.`;
 
 // ── SW startup: recover any meetings stuck in RECORDING status ──
 (async () => {
@@ -65,6 +75,46 @@ const MEETING_STATUS = {
   ERROR: 'Ошибка'
 };
 
+// ── Recording settings ──
+async function getRecordingSettings() {
+  return new Promise(resolve => {
+    chrome.storage.local.get(['saveVideo', 'saveDestination'], data => {
+      resolve({
+        saveVideo: data.saveVideo !== false, // default true
+        saveDestination: data.saveDestination || 'local'
+      });
+    });
+  });
+}
+
+// ── File naming ──
+function sanitizeFileName(value) {
+  return String(value || '')
+    .replace(/[/\\:*?"<>|]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100);
+}
+
+function buildRecordingFileNames(meeting) {
+  // formatDate returns "YYYY-MM-DD_HH-MM", convert to "YYYY-MM-DD HH-MM"
+  const rawDate = String(meeting.date || formatDate(meeting.id || Date.now()));
+  const datePart = rawDate.replace(/_/g, ' ').slice(0, 16);
+  const rawTitle = meeting.title || 'Без названия';
+  const titlePart = sanitizeFileName(rawTitle).slice(0, 60);
+  const baseName = sanitizeFileName(`${datePart} ${titlePart}`.trim());
+  const folderName = `Telemost Recordings/${baseName}`;
+  return {
+    folderName,
+    fileNames: {
+      audio:      `AUDIO - ${baseName}`,
+      video:      `VIDEO - ${baseName}`,
+      transcript: `TRANSCRIPT - ${baseName}`,
+      summary:    `SUMMARY - ${baseName}`
+    }
+  };
+}
+
 chrome.action.onClicked.addListener((tab) => {
   const tabId = tab && tab.id;
   if (tabId && isAllowedTelemostMeetingUrl(tab.url)) {
@@ -72,13 +122,11 @@ chrome.action.onClicked.addListener((tab) => {
     openOptionalPanel(tab);
     return;
   }
-
   openOptionalPanel(tab || null);
 });
 
 async function configureSidePanel() {
   if (!hasSidePanelApi()) return false;
-
   try {
     if (typeof chrome.sidePanel.setOptions === 'function') {
       await chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true });
@@ -106,14 +154,10 @@ async function openOptionalPanel(tab = null) {
     openPanelWindow();
     return;
   }
-
   try {
     await chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true });
     const windowId = tab && typeof tab.windowId === 'number' ? tab.windowId : null;
-    if (windowId === null) {
-      openPanelWindow();
-      return;
-    }
+    if (windowId === null) { openPanelWindow(); return; }
     await chrome.sidePanel.open({ windowId });
   } catch (e) {
     logError('openOptionalPanel/sidePanelFallback', e);
@@ -229,13 +273,11 @@ function getTabCaptureStreamId(tabId) {
 
 function normalizeStartRecordingError(error) {
   if (error && error.echoStartFailure) return error.echoStartFailure;
-
   const rawMessage = error instanceof Error ? error.message : String(error || '');
   const needsAction = /not been invoked|activeTab|active tab|permission|not allowed|Cannot access/i.test(rawMessage);
   if (needsAction) {
     return startFailure('action_required', START_FROM_ACTION_MESSAGE, { tabCaptureMessage: rawMessage });
   }
-
   return startFailure('tab_capture_failed', `Не удалось получить аудио вкладки: ${rawMessage}`, { tabCaptureMessage: rawMessage });
 }
 
@@ -358,8 +400,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // ── Google Drive messages ──
+  if (message.action === 'checkDriveStatus') {
+    checkDriveConnected().then(connected => sendResponse({ connected }));
+    return true;
+  }
+
+  if (message.action === 'connectDrive') {
+    connectDriveInteractive().then(result => sendResponse(result));
+    return true;
+  }
+
+  if (message.action === 'disconnectDrive') {
+    disconnectDrive().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
+  if (message.action === 'retryDriveUpload') {
+    const retryId = message.meetingId;
+    dbGetMeeting(retryId).then(meeting => {
+      if (!meeting) { sendResponse({ ok: false, error: 'Запись не найдена' }); return; }
+      uploadMeetingAssetsToDrive(meeting).catch(async (e) => {
+        logError('retryDriveUpload', e);
+        const errorMsg = e.message || 'Ошибка загрузки в Google Drive';
+        emitDriveProgress(retryId, `❌ ${errorMsg}`);
+        const current = await dbGetMeeting(retryId).catch(() => null);
+        if (current) {
+          await dbSaveMeeting({
+            ...current,
+            driveUploadStatus: 'error',
+            driveUploadError: errorMsg,
+            updatedAt: Date.now()
+          }).catch(() => {});
+          emitHistoryUpdated();
+        }
+      });
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
   if (message.action === 'recorderHeartbeat') {
-    // Intentionally empty — receiving this message is enough to keep the SW alive.
     return;
   }
 
@@ -400,14 +481,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.sizeBytes || 0
     );
   }
+
+  // ── Video data from offscreen ──
+  if (message.action === 'videoData') {
+    handleVideoData(message);
+    return;
+  }
 });
 
 async function startRecording(tabId, options = {}) {
   if (isRecording) {
-    return {
-      success: true,
-      ...getRecordingStatePayload()
-    };
+    return { success: true, ...getRecordingStatePayload() };
   }
 
   if (startRecordingPending) {
@@ -430,22 +514,31 @@ async function startRecording(tabId, options = {}) {
     const streamId = await getTabCaptureStreamId(tabId);
     const key = await getGroqKey();
     if (!key) return startFailure('missing_api_key', 'Groq API ключ не настроен. Открой ECHO и добавь ключ Groq.');
+
+    const settings = await getRecordingSettings();
+
     await ensureOffscreen();
     activeTabId = tabId;
     currentMeetingId = Date.now();
     recordingStartedAt = Date.now();
-    await dbSaveMeeting(buildRecordingMeeting(currentMeetingId));
-    chrome.runtime.sendMessage({ action: 'startCapture', streamId, tabId, meetingId: currentMeetingId });
+
+    await dbSaveMeeting(buildRecordingMeeting(currentMeetingId, settings));
+
+    chrome.runtime.sendMessage({
+      action: 'startCapture',
+      streamId,
+      tabId,
+      meetingId: currentMeetingId,
+      enableVideo: settings.saveVideo
+    });
+
     isRecording = true;
     persistRecordingState();
     emitHistoryUpdated();
     broadcastRecordingStateChanged();
-    chrome.runtime.sendMessage({ action: 'recordingStarted', startedAt: recordingStartedAt }).catch(() => {});
+    chrome.runtime.sendMessage({ action: 'recordingStarted', startedAt: recordingStartedAt, settings }).catch(() => {});
     chrome.tabs.sendMessage(tabId, { action: 'recordingStarted', startedAt: recordingStartedAt }).catch(() => {});
-    return {
-      success: true,
-      ...getRecordingStatePayload()
-    };
+    return { success: true, ...getRecordingStatePayload(), settings };
   } catch (e) {
     logError('startRecording', e);
     activeTabId = null;
@@ -571,6 +664,36 @@ async function handleAudioData(base64Data, tabId, tabClosed = false, chunkIndex 
   await transcribeMeeting(meetingId, { tabId, tabClosed, resume: false });
 }
 
+async function handleVideoData(message) {
+  const meetingId = message.meetingId;
+  if (!meetingId) return;
+
+  try {
+    const meeting = await dbGetMeeting(meetingId);
+    if (!meeting) return;
+
+    const hasData = !!message.data;
+    const videoError = hasData ? '' : (message.error || '');
+    const videoChunks = hasData
+      ? [{ index: 0, data: message.data, sizeBytes: message.sizeBytes || 0 }]
+      : [];
+
+    const updatedMeeting = { ...meeting, videoChunks, videoError, updatedAt: Date.now() };
+    await dbSaveMeeting(updatedMeeting);
+    emitHistoryUpdated();
+
+    // If meeting already finished transcription, export video now
+    if (hasData && meeting.status === MEETING_STATUS.DONE) {
+      const settings = await getRecordingSettings();
+      if (settings.saveVideo) {
+        exportVideoFile(updatedMeeting);
+      }
+    }
+  } catch (e) {
+    logError('handleVideoData', e);
+  }
+}
+
 function isShortRecording(meeting) {
   const startedAt = Number(meeting && meeting.createdAt ? meeting.createdAt : recordingStartedAt);
   if (!startedAt) return false;
@@ -579,7 +702,6 @@ function isShortRecording(meeting) {
 
 function confirmShortRecording(tabId, tabClosed, meeting) {
   if (!tabId || tabClosed) return Promise.resolve(true);
-
   const durationSeconds = Math.max(0, Math.round((Date.now() - Number(meeting.createdAt || Date.now())) / 1000));
   return new Promise((resolve) => {
     chrome.tabs.sendMessage(
@@ -590,10 +712,7 @@ function confirmShortRecording(tabId, tabClosed, meeting) {
         thresholdSeconds: Math.round(SHORT_RECORDING_THRESHOLD_MS / 1000)
       },
       (resp) => {
-        if (chrome.runtime.lastError) {
-          resolve(true);
-          return;
-        }
+        if (chrome.runtime.lastError) { resolve(true); return; }
         resolve(resp && resp.keep !== false);
       }
     );
@@ -675,11 +794,7 @@ async function transcribeMeeting(meetingId, { tabId = null, tabClosed = false, r
         return;
       }
 
-      workingMeeting = {
-        ...workingMeeting,
-        chunks,
-        updatedAt: Date.now()
-      };
+      workingMeeting = { ...workingMeeting, chunks, updatedAt: Date.now() };
       await dbSaveMeeting(workingMeeting);
     }
 
@@ -688,7 +803,19 @@ async function transcribeMeeting(meetingId, { tabId = null, tabClosed = false, r
       .map(chunk => chunk.transcript || '')
       .join('\n\n'));
 
-    const prompt = buildMeetingPrompt(fullTranscript);
+    let summary = '';
+    let summaryError = '';
+    let summaryPrompt = '';
+    if (hasSummarizableTranscript(fullTranscript)) {
+      try {
+        const result = await summarizeTranscriptSafe(fullTranscript, apiKey, meetingId, tabId, tabClosed);
+        summary = result.summary;
+        summaryPrompt = result.summaryPrompt;
+      } catch (e) {
+        summaryError = e.message || 'Не удалось сгенерировать саммари.';
+        logError('summarizeTranscript', e);
+      }
+    }
     const hasMeaningfulTranscript = fullTranscript !== EMPTY_RECORDING_TRANSCRIPT;
     const tags = meeting.tags && meeting.tags.length
       ? meeting.tags
@@ -704,7 +831,10 @@ async function transcribeMeeting(meetingId, { tabId = null, tabClosed = false, r
       chunks,
       title,
       transcript: fullTranscript,
-      prompt,
+      prompt: summaryPrompt,
+      summary,
+      summaryPrompt,
+      summaryError,
       tags,
       status: MEETING_STATUS.DONE,
       lastError: '',
@@ -714,15 +844,18 @@ async function transcribeMeeting(meetingId, { tabId = null, tabClosed = false, r
     emitHistoryUpdated();
 
     await exportMeetingAssets(completedMeeting);
-    chrome.runtime.sendMessage({ action: 'transcriptReady', transcript: fullTranscript, prompt, meetingId, tags }).catch(() => {});
+    chrome.runtime.sendMessage({ action: 'transcriptReady', transcript: fullTranscript, summary, summaryPrompt, summaryError, prompt: summaryPrompt, meetingId, tags }).catch(() => {});
     if (tabId && !tabClosed) {
-      chrome.tabs.sendMessage(tabId, { action: 'transcriptReady', prompt }).catch(() => {});
+      chrome.tabs.sendMessage(tabId, { action: 'transcriptReady', summary, prompt: summaryPrompt, summaryError }).catch(() => {});
     } else {
+      const videoNote = completedMeeting.videoChunks && completedMeeting.videoChunks.length > 0
+        ? ' Аудио, видео и транскрипт'
+        : ' Аудио и транскрипт';
       chrome.notifications.create({
         type: 'basic',
         iconUrl: 'icons/icon48.png',
         title: 'ECHO',
-        message: '✅ Транскрипт готов и сохранён в Downloads/Telemost Recordings/'
+        message: `✅ Транскрипт готов.${videoNote} сохранены в Downloads/Telemost Recordings/`
       });
     }
   } catch (e) {
@@ -739,17 +872,27 @@ async function transcribeMeeting(meetingId, { tabId = null, tabClosed = false, r
   }
 }
 
-function buildRecordingMeeting(meetingId) {
+function buildRecordingMeeting(meetingId, settings = {}) {
   return {
     id: meetingId,
     date: formatDate(meetingId),
     dateDisplay: new Date(meetingId).toLocaleString('ru'),
     chunks: [],
+    videoChunks: [],
+    videoError: '',
     transcript: '',
     prompt: '',
+    summary: '',
+    summaryPrompt: '',
+    summaryError: '',
     tags: [],
     status: MEETING_STATUS.RECORDING,
     lastError: '',
+    saveDestination: settings.saveDestination || 'local',
+    driveFolderId: '',
+    driveFolderUrl: '',
+    driveUploadStatus: settings.saveDestination === 'google_drive' ? 'pending' : 'not_configured',
+    driveUploadError: '',
     createdAt: meetingId,
     updatedAt: meetingId
   };
@@ -771,45 +914,136 @@ function estimateBase64Size(base64Data) {
   return Math.floor((base64Data.length * 3) / 4) - padding;
 }
 
-async function exportMeetingAssets(meeting) {
-  const fileBase = buildMeetingFileBase(meeting);
-  const chunks = [...(meeting.chunks || [])].sort((a, b) => Number(a.index) - Number(b.index));
+// ── Export ──
 
-  const audioBase64 = combineAudioChunksBase64(chunks);
+async function exportMeetingAssets(meeting) {
+  const destination = meeting.saveDestination || 'local';
+
+  if (destination === 'google_drive') {
+    uploadMeetingAssetsToDrive(meeting).catch(async (e) => {
+      logError('exportMeetingAssets/drive', e);
+      const errorMsg = e.message || 'Ошибка загрузки в Google Drive';
+      emitDriveProgress(meeting.id, `❌ ${errorMsg}`);
+      try {
+        const current = await dbGetMeeting(meeting.id);
+        if (current) {
+          await dbSaveMeeting({
+            ...current,
+            driveUploadStatus: 'error',
+            driveUploadError: errorMsg,
+            updatedAt: Date.now()
+          });
+          emitHistoryUpdated();
+        }
+      } catch (dbErr) {
+        logError('exportMeetingAssets/drive/dbSave', dbErr);
+      }
+    });
+    return;
+  }
+
+  // Local downloads
+  const settings = await getRecordingSettings();
+  const { folderName, fileNames } = buildRecordingFileNames(meeting);
+
+  const audioChunks = [...(meeting.chunks || [])].sort((a, b) => Number(a.index) - Number(b.index));
+  const audioBase64 = combineBase64Chunks(audioChunks);
   if (audioBase64) {
     chrome.downloads.download({
       url: `data:audio/webm;base64,${audioBase64}`,
-      filename: `${fileBase}.webm`,
+      filename: `${folderName}/${fileNames.audio}.webm`,
       saveAs: false
     });
   }
 
-  chrome.downloads.download({
-    url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(meeting.transcript || ''),
-    filename: `${fileBase}.txt`,
-    saveAs: false
-  });
-}
-
-function combineAudioChunksBase64(chunks) {
-  const audioChunks = chunks
-    .filter(chunk => chunk && chunk.data)
-    .sort((a, b) => Number(a.index) - Number(b.index));
-
-  if (audioChunks.length === 0) return '';
-  if (audioChunks.length === 1) return audioChunks[0].data;
-
-  const bytes = audioChunks.map(chunk => base64ToUint8Array(chunk.data));
-  const totalLength = bytes.reduce((sum, item) => sum + item.length, 0);
-  const combined = new Uint8Array(totalLength);
-  let offset = 0;
-
-  for (const item of bytes) {
-    combined.set(item, offset);
-    offset += item.length;
+  const videoChunks = [...(meeting.videoChunks || [])].sort((a, b) => Number(a.index) - Number(b.index));
+  if (settings.saveVideo && videoChunks.length > 0) {
+    const videoBase64 = combineBase64Chunks(videoChunks);
+    if (videoBase64) {
+      chrome.downloads.download({
+        url: `data:video/webm;base64,${videoBase64}`,
+        filename: `${folderName}/${fileNames.video}.webm`,
+        saveAs: false
+      });
+    }
   }
 
+  if (meeting.transcript) {
+    chrome.downloads.download({
+      url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(meeting.transcript),
+      filename: `${folderName}/${fileNames.transcript}.txt`,
+      saveAs: false
+    });
+  }
+
+  if (meeting.summary || meeting.summaryError) {
+    const summaryText = meeting.summary || `Саммари не сгенерировалось: ${meeting.summaryError}`;
+    chrome.downloads.download({
+      url: 'data:text/plain;charset=utf-8,' + encodeURIComponent(summaryText),
+      filename: `${folderName}/${fileNames.summary}.txt`,
+      saveAs: false
+    });
+  }
+}
+
+// Called when video data arrives after meeting is already DONE
+async function exportVideoFile(meeting) {
+  const destination = meeting.saveDestination || 'local';
+  const videoChunks = [...(meeting.videoChunks || [])].sort((a, b) => Number(a.index) - Number(b.index));
+
+  if (destination === 'google_drive') {
+    if (!meeting.driveFolderId) return;
+    try {
+      const token = await getDriveToken(false);
+      if (!token) return;
+      const settings = await getRecordingSettings();
+      if (!settings.saveVideo) return;
+      const videoBase64 = combineBase64Chunks(videoChunks);
+      if (!videoBase64) return;
+      const { fileNames } = buildRecordingFileNames(meeting);
+      emitDriveProgress(meeting.id, 'Загружаю видео...');
+      await uploadBinaryToDrive(
+        `${fileNames.video}.webm`, 'video/webm',
+        base64ToUint8Array(videoBase64), meeting.driveFolderId, token,
+        (pct) => emitDriveProgress(meeting.id, `Загружаю видео: ${pct}%...`)
+      );
+      emitDriveProgress(meeting.id, 'Видео загружено в Google Drive.');
+    } catch (e) {
+      logError('exportVideoFile/drive', e);
+    }
+    return;
+  }
+
+  const { folderName, fileNames } = buildRecordingFileNames(meeting);
+  const videoBase64 = combineBase64Chunks(videoChunks);
+  if (videoBase64) {
+    chrome.downloads.download({
+      url: `data:video/webm;base64,${videoBase64}`,
+      filename: `${folderName}/${fileNames.video}.webm`,
+      saveAs: false
+    });
+  }
+}
+
+function combineBase64Chunks(chunks) {
+  const valid = chunks.filter(c => c && c.data).sort((a, b) => Number(a.index) - Number(b.index));
+  if (valid.length === 0) return '';
+  if (valid.length === 1) return valid[0].data;
+
+  const bytes = valid.map(c => base64ToUint8Array(c.data));
+  const totalLength = bytes.reduce((sum, arr) => sum + arr.length, 0);
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const arr of bytes) {
+    combined.set(arr, offset);
+    offset += arr.length;
+  }
   return uint8ArrayToBase64(combined);
+}
+
+// Keep old name as alias (used nowhere else but defensive)
+function combineAudioChunksBase64(chunks) {
+  return combineBase64Chunks(chunks);
 }
 
 function base64ToUint8Array(base64) {
@@ -822,23 +1056,229 @@ function base64ToUint8Array(base64) {
 function uint8ArrayToBase64(bytes) {
   const batchSize = 0x8000;
   let binary = '';
-
   for (let i = 0; i < bytes.length; i += batchSize) {
     const batch = bytes.subarray(i, i + batchSize);
     binary += String.fromCharCode(...batch);
   }
-
   return btoa(binary);
-}
-
-function buildMeetingFileBase(meeting) {
-  const baseDate = meeting.date || formatDate(meeting.id || Date.now());
-  const meetingName = `${baseDate}_meeting`;
-  return `Telemost Recordings/${meetingName}/${meetingName}`;
 }
 
 function emitHistoryUpdated() {
   chrome.runtime.sendMessage({ action: 'historyUpdated' }).catch(() => {});
+}
+
+// ── Google Drive integration ──
+
+async function getDriveToken(interactive) {
+  return new Promise((resolve, reject) => {
+    chrome.identity.getAuthToken({ interactive }, (token) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        resolve(token || null);
+      }
+    });
+  });
+}
+
+async function checkDriveConnected() {
+  try {
+    const token = await getDriveToken(false);
+    return !!token;
+  } catch {
+    return false;
+  }
+}
+
+async function connectDriveInteractive() {
+  try {
+    const token = await getDriveToken(true);
+    if (!token) return { ok: false, error: 'Авторизация отменена' };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+async function disconnectDrive() {
+  return new Promise((resolve) => {
+    chrome.identity.getAuthToken({ interactive: false }, (token) => {
+      if (chrome.runtime.lastError || !token) { resolve(); return; }
+      chrome.identity.removeCachedAuthToken({ token }, () => {
+        fetch(`https://accounts.google.com/o/oauth2/revoke?token=${token}`)
+          .catch(() => {}).finally(resolve);
+      });
+    });
+  });
+}
+
+function buildDriveFolderName(meeting) {
+  const rawDate = String(meeting.date || formatDate(meeting.id || Date.now()));
+  const datePart = rawDate.replace(/_/g, ' ').slice(0, 10); // YYYY-MM-DD
+  const rawTitle = meeting.title || 'Без названия';
+  return sanitizeFileName(`${datePart} - ${sanitizeFileName(rawTitle).slice(0, 80)}`.trim());
+}
+
+function emitDriveProgress(meetingId, status) {
+  chrome.runtime.sendMessage({ action: 'driveUploadProgress', meetingId, status }).catch(() => {});
+}
+
+async function createDriveFolder(name, token) {
+  const resp = await fetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder' })
+  });
+  if (!resp.ok) throw new Error(`Drive: ошибка создания папки (${resp.status})`);
+  const data = await resp.json();
+  return { id: data.id, url: `https://drive.google.com/drive/folders/${data.id}` };
+}
+
+async function uploadTextToDrive(fileName, text, folderId, token) {
+  const boundary = 'echo_mp_' + Date.now();
+  const metadata = JSON.stringify({ name: fileName, parents: [folderId] });
+  const enc = new TextEncoder();
+  const parts = [
+    enc.encode(`--${boundary}\r\nContent-Type: application/json; charset=utf-8\r\n\r\n${metadata}\r\n`),
+    enc.encode(`--${boundary}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n`),
+    enc.encode(text),
+    enc.encode(`\r\n--${boundary}--`)
+  ];
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const body = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { body.set(p, off); off += p.length; }
+
+  const resp = await fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`
+      },
+      body
+    }
+  );
+  if (!resp.ok) throw new Error(`Drive: ошибка загрузки текста (${resp.status})`);
+}
+
+async function uploadBinaryToDrive(fileName, mimeType, bytes, folderId, token, onProgress) {
+  const initResp = await fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'X-Upload-Content-Type': mimeType,
+        'X-Upload-Content-Length': String(bytes.length)
+      },
+      body: JSON.stringify({ name: fileName, parents: [folderId] })
+    }
+  );
+  if (!initResp.ok) throw new Error(`Drive: ошибка инициализации загрузки (${initResp.status})`);
+  const uploadUrl = initResp.headers.get('Location');
+  if (!uploadUrl) throw new Error('Drive: не получен URL загрузки');
+
+  const CHUNK = 5 * 1024 * 1024;
+  let sent = 0;
+
+  while (sent < bytes.length) {
+    const end = Math.min(sent + CHUNK, bytes.length);
+    const chunk = bytes.slice(sent, end);
+
+    const putResp = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Range': `bytes ${sent}-${end - 1}/${bytes.length}`,
+        'Content-Type': mimeType
+      },
+      body: chunk
+    });
+
+    if (putResp.status !== 200 && putResp.status !== 201 && putResp.status !== 308) {
+      throw new Error(`Drive: ошибка при загрузке фрагмента (${putResp.status})`);
+    }
+
+    sent = end;
+    if (onProgress) onProgress(Math.round((sent / bytes.length) * 100));
+  }
+}
+
+async function uploadMeetingAssetsToDrive(meeting) {
+  const meetingId = meeting.id;
+  const settings = await getRecordingSettings();
+  const { fileNames } = buildRecordingFileNames(meeting);
+  const folderName = buildDriveFolderName(meeting);
+
+  let token;
+  try {
+    token = await getDriveToken(false);
+  } catch (e) {
+    throw new Error(`Drive auth: ${e.message}`);
+  }
+  if (!token) throw new Error('Google Drive не подключён. Подключи его в настройках ECHO.');
+
+  emitDriveProgress(meetingId, 'Создаю папку на Google Drive...');
+  const folder = await createDriveFolder(folderName, token);
+
+  const withFolder = {
+    ...meeting,
+    driveFolderId: folder.id,
+    driveFolderUrl: folder.url,
+    driveUploadStatus: 'uploading',
+    driveUploadError: '',
+    updatedAt: Date.now()
+  };
+  await dbSaveMeeting(withFolder);
+  emitHistoryUpdated();
+
+  if (meeting.transcript) {
+    emitDriveProgress(meetingId, 'Загружаю транскрипт...');
+    await uploadTextToDrive(`${fileNames.transcript}.txt`, meeting.transcript, folder.id, token);
+  }
+
+  if (meeting.summary || meeting.summaryError) {
+    emitDriveProgress(meetingId, 'Загружаю саммари...');
+    const summaryText = meeting.summary || `Саммари не сгенерировалось: ${meeting.summaryError}`;
+    await uploadTextToDrive(`${fileNames.summary}.txt`, summaryText, folder.id, token);
+  }
+
+  const audioChunks = [...(meeting.chunks || [])].sort((a, b) => Number(a.index) - Number(b.index));
+  const audioBase64 = combineBase64Chunks(audioChunks);
+  if (audioBase64) {
+    emitDriveProgress(meetingId, 'Загружаю аудио...');
+    await uploadBinaryToDrive(
+      `${fileNames.audio}.webm`, 'audio/webm',
+      base64ToUint8Array(audioBase64), folder.id, token, null
+    );
+  }
+
+  const videoChunks = [...(meeting.videoChunks || [])].sort((a, b) => Number(a.index) - Number(b.index));
+  if (settings.saveVideo && videoChunks.length > 0) {
+    const videoBase64 = combineBase64Chunks(videoChunks);
+    if (videoBase64) {
+      const videoBytes = base64ToUint8Array(videoBase64);
+      await uploadBinaryToDrive(
+        `${fileNames.video}.webm`, 'video/webm',
+        videoBytes, folder.id, token,
+        (pct) => emitDriveProgress(meetingId, `Загружаю видео: ${pct}%...`)
+      );
+    }
+  }
+
+  emitDriveProgress(meetingId, 'Готово. Файлы загружены на Google Drive.');
+  const finalMeeting = {
+    ...withFolder,
+    driveUploadStatus: 'done',
+    updatedAt: Date.now()
+  };
+  await dbSaveMeeting(finalMeeting);
+  emitHistoryUpdated();
 }
 
 async function autoTagMeeting(transcript, apiKey) {
@@ -860,10 +1300,7 @@ async function autoTagMeeting(transcript, apiKey) {
           role: 'system',
           content: 'Ты классификатор деловых встреч. Из предложенного списка тегов выбери подходящие (не более 3). Ответь только именами тегов через запятую. Если ни один не подходит — ответь пустой строкой.'
         },
-        {
-          role: 'user',
-          content: `Теги: ${tagNames}\n\nТранскрипт:\n${excerpt}`
-        }
+        { role: 'user', content: `Теги: ${tagNames}\n\nТранскрипт:\n${excerpt}` }
       ],
       max_tokens: 60,
       temperature: 0
@@ -889,10 +1326,7 @@ async function generateMeetingTitle(transcript, apiKey) {
           role: 'system',
           content: 'Ты помогаешь назвать деловую встречу по транскрипту. Верни только короткий заголовок на русском, 2-6 слов, без кавычек, без точки в конце.'
         },
-        {
-          role: 'user',
-          content: `Транскрипт встречи:\n${excerpt}`
-        }
+        { role: 'user', content: `Транскрипт встречи:\n${excerpt}` }
       ],
       max_tokens: 24,
       temperature: 0.2
@@ -907,11 +1341,8 @@ async function generateMeetingTitle(transcript, apiKey) {
 }
 
 function fallbackMeetingTitle(transcript) {
-  const normalized = String(transcript || '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const normalized = String(transcript || '').replace(/\s+/g, ' ').trim();
   if (!normalized) return 'Встреча без названия';
-
   const firstSentence = normalized.split(/[.!?\n]/)[0].trim();
   const source = firstSentence || normalized;
   const words = source.split(' ').filter(Boolean).slice(0, 6);
@@ -928,14 +1359,136 @@ function sanitizeMeetingTitle(value) {
     .slice(0, 80);
 }
 
-function buildMeetingPrompt(transcript) {
-  return `Вот транскрипт записи встречи. Сделай:
-1. Краткое общее саммари созвона
-2. Определение ключевых задач и областей ответственности сторон
-3. Важные поинты, которые можно и нужно внести в задачи и использовать в дальнейшей проработке — все согласованные моменты
+async function getSummaryBasePrompt() {
+  return new Promise(resolve => {
+    chrome.storage.local.get(SUMMARY_PROMPT_STORAGE_KEY, (data) => {
+      resolve(String(data[SUMMARY_PROMPT_STORAGE_KEY] || DEFAULT_SUMMARY_PROMPT).trim() || DEFAULT_SUMMARY_PROMPT);
+    });
+  });
+}
 
-Транскрипт:
-${transcript}`;
+function hasSummarizableTranscript(transcript) {
+  const normalized = String(transcript || '').trim();
+  return normalized && normalized !== EMPTY_RECORDING_TRANSCRIPT;
+}
+
+const SUMMARY_MAX_INPUT_CHARS_PER_CHUNK = 7000;
+const SUMMARY_REQUEST_DELAY_MS = 13000;
+
+function parseGroqRetryAfterMs(text) {
+  const match = String(text || '').match(/try again in ([\d.]+)s/i);
+  if (match) return Math.ceil(parseFloat(match[1]) + 2) * 1000;
+  return null;
+}
+
+function splitTranscriptIntoChunks(text, maxChars) {
+  if (text.length <= maxChars) return [text];
+  const chunks = [];
+  let remaining = text.trim();
+  while (remaining.length > maxChars) {
+    let splitAt = -1;
+    const paraIdx = remaining.lastIndexOf('\n\n', maxChars);
+    if (paraIdx > maxChars * 0.4) { splitAt = paraIdx + 2; }
+    if (splitAt === -1) {
+      const sentIdx = remaining.lastIndexOf('. ', maxChars);
+      if (sentIdx > maxChars * 0.4) splitAt = sentIdx + 2;
+    }
+    if (splitAt === -1) {
+      const nlIdx = remaining.lastIndexOf('\n', maxChars);
+      if (nlIdx > maxChars * 0.4) splitAt = nlIdx + 1;
+    }
+    if (splitAt === -1) splitAt = maxChars;
+    chunks.push(remaining.slice(0, splitAt).trim());
+    remaining = remaining.slice(splitAt).trim();
+  }
+  if (remaining.length > 0) chunks.push(remaining);
+  return chunks;
+}
+
+function sendSummaryProgress(status, meetingId, tabId, tabClosed) {
+  chrome.runtime.sendMessage({ action: 'summaryProgress', status, meetingId }).catch(() => {});
+  if (tabId && !tabClosed) {
+    chrome.tabs.sendMessage(tabId, { action: 'summaryProgress', status }).catch(() => {});
+  }
+}
+
+async function groqChatCompletionWithRateLimit(payload, apiKey, onStatus, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const resp = await fetchWithRetry('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }, { timeoutMs: GROQ_FETCH_TIMEOUT_MS });
+    if (resp.status !== 429) return resp;
+    const text = await resp.text();
+    if (attempt >= maxRetries) throw new Error(`Groq rate limit exceeded: ${text}`);
+    const waitMs = parseGroqRetryAfterMs(text) || 15000;
+    const waitSec = Math.round(waitMs / 1000);
+    if (onStatus) onStatus(`Жду лимит Groq, повтор через ${waitSec} сек...`);
+    await sleep(waitMs);
+  }
+}
+
+async function summarizeTranscriptSafe(fullTranscript, apiKey, meetingId, tabId, tabClosed) {
+  const onStatus = (status) => sendSummaryProgress(status, meetingId, tabId, tabClosed);
+  const basePrompt = await getSummaryBasePrompt();
+
+  if (fullTranscript.length <= SUMMARY_MAX_INPUT_CHARS_PER_CHUNK) {
+    onStatus('Формирую саммари...');
+    const summaryPrompt = `${basePrompt}\n\nТранскрипт:\n${fullTranscript}`;
+    const resp = await groqChatCompletionWithRateLimit({
+      model: 'llama-3.1-8b-instant',
+      messages: [
+        { role: 'system', content: 'Ты аккуратный редактор деловых встреч. Возвращай только готовое саммари без вступлений и без упоминания промпта.' },
+        { role: 'user', content: summaryPrompt }
+      ],
+      max_tokens: 1400,
+      temperature: 0.2
+    }, apiKey, onStatus);
+    if (!resp.ok) throw new Error(`Groq summary: ${resp.status} — ${await resp.text()}`);
+    const data = await resp.json();
+    const summary = String(data.choices?.[0]?.message?.content || '').trim();
+    if (!summary) throw new Error('Groq вернул пустое саммари.');
+    return { summary, summaryPrompt };
+  }
+
+  const chunks = splitTranscriptIntoChunks(fullTranscript, SUMMARY_MAX_INPUT_CHARS_PER_CHUNK);
+  const partials = [];
+  for (let i = 0; i < chunks.length; i++) {
+    onStatus(`Формирую саммари: часть ${i + 1} из ${chunks.length}...`);
+    const resp = await groqChatCompletionWithRateLimit({
+      model: 'llama-3.1-8b-instant',
+      messages: [
+        { role: 'system', content: 'Ты аккуратный редактор деловых встреч. Возвращай только готовое саммари без вступлений и без упоминания промпта.' },
+        { role: 'user', content: `Выдели ключевые темы, решения, задачи, договорённости и важные факты только из этого фрагмента встречи. Будь краток.\n\nФрагмент:\n${chunks[i]}` }
+      ],
+      max_tokens: 600,
+      temperature: 0.2
+    }, apiKey, onStatus);
+    if (!resp.ok) throw new Error(`Groq summary: ${resp.status} — ${await resp.text()}`);
+    const data = await resp.json();
+    partials.push(String(data.choices?.[0]?.message?.content || '').trim());
+    if (i < chunks.length - 1) await sleep(SUMMARY_REQUEST_DELAY_MS);
+  }
+
+  await sleep(SUMMARY_REQUEST_DELAY_MS);
+  onStatus('Формирую итоговое саммари...');
+  const combined = partials.join('\n\n---\n\n');
+  const summaryPrompt = `[map-reduce из ${chunks.length} фрагментов]\n\n${basePrompt}`;
+  const resp = await groqChatCompletionWithRateLimit({
+    model: 'llama-3.1-8b-instant',
+    messages: [
+      { role: 'system', content: 'Ты аккуратный редактор деловых встреч. Возвращай только готовое саммари без вступлений и без упоминания промпта.' },
+      { role: 'user', content: `${basePrompt}\n\nЧастичные саммари фрагментов встречи:\n${combined}` }
+    ],
+    max_tokens: 1400,
+    temperature: 0.2
+  }, apiKey, onStatus);
+  if (!resp.ok) throw new Error(`Groq summary: ${resp.status} — ${await resp.text()}`);
+  const data = await resp.json();
+  const summary = String(data.choices?.[0]?.message?.content || '').trim();
+  if (!summary) throw new Error('Groq вернул пустое саммари.');
+  return { summary, summaryPrompt };
 }
 
 function formatDate(ts) {
@@ -944,7 +1497,6 @@ function formatDate(ts) {
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}`;
 }
 
-// Known Whisper hallucination patterns for Russian audio — filtered out after transcription.
 const WHISPER_HALLUCINATIONS = [
   /^продолжение следует[.\s…]*/i,
   /^субтитры\s+(сделаны|добавлены|создаются)[.\s…]*/i,
@@ -962,15 +1514,10 @@ function filterWhisperHallucinations(text) {
   const normalized = text.replace(/\s+/g, ' ').trim();
   if (!normalized) return '';
   if (isKnownEmptyTranscriptHallucination(normalized)) return '';
-
-  // If the whole text is a repeated hallucination phrase, return empty string.
   const singlePhrase = normalized.split(/[.,!?…\n]+/).map(s => s.trim()).filter(Boolean);
   if (singlePhrase.length > 0) {
     const unique = new Set(singlePhrase.map(s => s.toLowerCase()));
-    // All segments are the same hallucinated phrase → fully hallucinated
-    if (unique.size === 1 && WHISPER_HALLUCINATIONS.some(re => re.test(singlePhrase[0]))) {
-      return '';
-    }
+    if (unique.size === 1 && WHISPER_HALLUCINATIONS.some(re => re.test(singlePhrase[0]))) return '';
   }
   return normalized;
 }
@@ -981,11 +1528,7 @@ function isKnownEmptyTranscriptHallucination(text) {
     .replace(/ё/g, 'е')
     .replace(/\s+/g, ' ')
     .trim();
-
-  if (/^редактор субтитров(?:\s|$)/.test(normalized) && /(?:^|\s)корректор(?:\s|$)/.test(normalized)) {
-    return true;
-  }
-
+  if (/^редактор субтитров(?:\s|$)/.test(normalized) && /(?:^|\s)корректор(?:\s|$)/.test(normalized)) return true;
   return false;
 }
 
@@ -1026,10 +1569,7 @@ async function fetchWithRetry(url, options = {}, retryOptions = {}) {
     const controller = new AbortController();
     const timerId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await fetch(url, {
-        ...options,
-        signal: controller.signal
-      });
+      return await fetch(url, { ...options, signal: controller.signal });
     } catch (error) {
       lastError = error;
       const canRetry = attempt < maxAttempts && isRetriableGroqError(error);
@@ -1039,7 +1579,6 @@ async function fetchWithRetry(url, options = {}, retryOptions = {}) {
       clearTimeout(timerId);
     }
   }
-
   throw normalizeGroqFetchError(lastError);
 }
 
@@ -1061,10 +1600,7 @@ async function transcribeBase64(base64Data, apiKey) {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}` },
     body: formData
-  }, {
-    timeoutMs: GROQ_FETCH_TIMEOUT_MS,
-    retryDelaysMs: GROQ_RETRY_DELAYS_MS
-  });
+  }, { timeoutMs: GROQ_FETCH_TIMEOUT_MS, retryDelaysMs: GROQ_RETRY_DELAYS_MS });
 
   if (!resp.ok) throw new Error(`Groq: ${resp.status} — ${await resp.text()}`);
   const raw = await resp.text();

@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ECHO (Запись и траскрибация встреч)",
-  "version": "1.1",
+  "version": "1.2",
+  "version_name": "1.2 beta",
   "description": "Записывает встречи Телемост и транскрибирует через Groq",
   "permissions": [
     "tabCapture",
@@ -12,13 +13,20 @@
     "clipboardWrite",
     "activeTab",
     "tabs",
-    "sidePanel"
+    "sidePanel",
+    "identity"
   ],
   "host_permissions": [
     "https://telemost.yandex.ru/*",
     "https://telemost.yandex.com/*",
-    "https://api.groq.com/*"
+    "https://api.groq.com/*",
+    "https://www.googleapis.com/*",
+    "https://accounts.google.com/*"
   ],
+  "oauth2": {
+    "client_id": "REPLACE_WITH_YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com",
+    "scopes": ["https://www.googleapis.com/auth/drive.file"]
+  },
   "background": {
     "service_worker": "background.js"
   },

@@ -147,17 +147,19 @@
       setStatus('Короткая запись удалена.', 4000);
       setRecording(false);
     } else if (msg.action === 'transcriptReady') {
-      // Copy to clipboard
-      navigator.clipboard.writeText(msg.prompt).catch(() => {
+      const clipboardText = msg.summary || msg.prompt || '';
+      navigator.clipboard.writeText(clipboardText).catch(() => {
         const ta = document.createElement('textarea');
-        ta.value = msg.prompt;
+        ta.value = clipboardText;
         Object.assign(ta.style, { position: 'fixed', opacity: '0' });
         document.body.appendChild(ta);
         ta.select();
         document.execCommand('copy');
         document.body.removeChild(ta);
       });
-      setStatus('✅ Транскрипт готов и скопирован в буфер — вставляй в Клода (Cmd+V)');
+      setStatus(msg.summaryError
+        ? '✅ Транскрипт готов. Саммари не сгенерировалось, промпт скопирован в буфер.'
+        : '✅ Саммари готово и скопировано в буфер');
       setRecording(false);
     } else if (msg.action === 'error') {
       setStatus('❌ ' + msg.error);

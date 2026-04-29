@@ -60,7 +60,7 @@
 
     header {
       background: #010101;
-      padding: 14px 16px;
+      padding: 14px 10px;
       border-bottom: 1px solid #1f1f1f;
       display: flex;
       align-items: center;
@@ -79,6 +79,7 @@
       min-width: 0;
       padding: 3px 0;
       overflow: hidden;
+      margin-left: -5px;
     }
 
     .logo img {
@@ -105,6 +106,7 @@
       border-radius: 12px; background: #2a2a2d; color: #a7a7ad; font-weight: 500;
       flex: 0 0 auto;
       white-space: nowrap;
+      margin-right: 11px;
     }
     #status-badge.recording  { background: #ffeaea; color: #d62d20; }
     #status-badge.processing { background: #fff3e0; color: #e65100; }
@@ -156,11 +158,42 @@
       color: #999; margin-bottom: 8px;
     }
 
-    #transcript-text, #summary-text {
+    #transcript-text, #summary-text, #file-transcript-text, #file-summary-text {
       font-size: 13px; line-height: 1.6; color: #1c1c1e;
       white-space: pre-wrap; word-break: break-word;
       max-height: 300px; overflow-y: auto;
     }
+
+    #summary-text.summary-preview,
+    #file-summary-text.summary-preview {
+      max-height: 160px;
+      overflow: hidden;
+    }
+
+    .summary-error {
+      color: #b42318;
+      background: #fdecea;
+      border: 1px solid #f3c2bd;
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin-top: 8px;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .btn-show-summary {
+      width: 100%;
+      margin-top: 8px;
+      padding: 8px 10px;
+      background: #f7f7f8;
+      color: #555;
+      border: 1px solid #ececf0;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-show-summary:hover { background: #eeeef2; opacity: 1; }
 
     .empty { color: #bbb; font-size: 13px; font-style: italic; }
 
@@ -201,6 +234,8 @@
     .file-drop-icon { font-size: 24px; margin-bottom: 6px; }
     .file-drop-label { font-size: 12px; color: #888; line-height: 1.4; }
     .file-drop-label strong { color: #d62d20; }
+    .file-drop-hint { font-size: 11px; color: #aaa; line-height: 1.4; margin-top: 6px; }
+    .file-drop-formats { font-size: 10px; color: #ccc; margin-top: 4px; }
     .file-chosen-name {
       font-size: 12px; font-weight: 600; color: #1c1c1e;
       margin: 8px 0 4px; overflow: hidden;
@@ -208,8 +243,53 @@
     }
     #upload-status { margin-top: 8px; font-size: 12px; color: #888; min-height: 16px; }
 
+    /* ── Processing progress block ── */
+    .processing-progress {
+      background: #f6f8ff;
+      border: 1px solid #dde5f4;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-top: 10px;
+    }
+    .processing-progress-stage {
+      font-size: 12px;
+      color: #333;
+      margin-bottom: 9px;
+      line-height: 1.4;
+      font-weight: 500;
+    }
+    .processing-progress-bar-wrap {
+      background: #dde5f4;
+      border-radius: 3px;
+      height: 4px;
+      margin-bottom: 8px;
+      overflow: hidden;
+    }
+    .processing-progress-bar {
+      background: #d62d20;
+      border-radius: 3px;
+      height: 4px;
+      width: 0%;
+      transition: width 0.7s ease;
+    }
+    .processing-progress-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: #777;
+    }
+    .processing-progress-remaining { font-weight: 600; color: #333; }
+    .processing-progress-hint {
+      font-size: 10px;
+      color: #aaa;
+      margin-top: 6px;
+      line-height: 1.3;
+    }
+
     /* ── History ── */
     #history-list { list-style: none; }
+    .history-list { list-style: none; }
 
     .history-day-group + .history-day-group {
       margin-top: 12px;
@@ -224,11 +304,13 @@
     }
     .history-day-list { list-style: none; }
 
-    #history-list li {
+    #history-list li,
+    .history-list li {
       padding: 8px 0;
       border-bottom: 1px solid #f0f0f0;
     }
-    #history-list li:last-child { border-bottom: none; }
+    #history-list li:last-child,
+    .history-list li:last-child { border-bottom: none; }
 
     .hi-main-row {
       display: flex; align-items: flex-start;
@@ -246,7 +328,7 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       margin-bottom: 3px;
     }
-    .hi-date { font-size: 12px; font-weight: 600; color: #555; }
+    .hi-date { font-size: 12px; font-weight: 400; color: #aaa; }
     .hi-preview { color: #bbb; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
 
     .meeting-status {
@@ -379,14 +461,16 @@
 
     /* ── Tag filter ── */
     .history-filter-wrap { margin-bottom: 8px; }
-    #history-tag-filter {
+    #history-tag-filter,
+    [id^="history-tag-filter-"] {
       width: 100%; padding: 8px 12px;
       border: 1.5px solid #e5e5ea; border-radius: 8px;
       font-size: 12px; outline: none; background: #fff;
       transition: border-color 0.15s; font-family: inherit;
       color: #1c1c1e;
     }
-    #history-tag-filter:focus { border-color: #d62d20; }
+    #history-tag-filter:focus,
+    [id^="history-tag-filter-"]:focus { border-color: #d62d20; }
 
     /* ── History actions (export/import) ── */
     .btn-history-action {
@@ -398,12 +482,28 @@
 
     /* ── History search ── */
     .history-search-wrap { margin-bottom: 8px; }
-    #history-search {
+    #history-search,
+    [id^="history-search-"] {
       width: 100%; padding: 8px 12px;
       border: 1.5px solid #e5e5ea; border-radius: 8px;
       font-size: 12px; outline: none; transition: border-color 0.15s; font-family: inherit;
     }
-    #history-search:focus { border-color: #d62d20; }
+    #history-search:focus,
+    [id^="history-search-"]:focus { border-color: #d62d20; }
+
+    .btn-history-toggle {
+      width: 100%;
+      margin-top: 8px;
+      padding: 8px 10px;
+      background: #f7f7f8;
+      color: #555;
+      border: 1px solid #ececf0;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-history-toggle:hover { background: #eeeef2; opacity: 1; }
 
     /* ── API key settings ── */
     .api-settings { margin-top: 6px; }
@@ -445,6 +545,24 @@
     }
     .btn-api-save:hover { background: #b52518; }
     .api-saved { font-size: 11px; color: #2e7d32; font-weight: 600; display: none; }
+
+    .settings-textarea {
+      width: 100%;
+      min-height: 190px;
+      resize: vertical;
+      padding: 10px 12px;
+      border: 1.5px solid #e5e5ea;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.5;
+      font-family: inherit;
+      outline: none;
+      color: #1c1c1e;
+      margin-bottom: 10px;
+    }
+    .settings-textarea:focus { border-color: #d62d20; }
+    .settings-actions { display: flex; gap: 8px; }
+    .settings-saved { font-size: 11px; color: #2e7d32; font-weight: 600; min-height: 16px; margin-top: 8px; }
 
     /* ── Tags tab ── */
     .tag-mgmt-add-row {
@@ -519,6 +637,183 @@
       opacity: 0; transition: opacity 0.2s; pointer-events: none;
     }
     .copied-toast.show { opacity: 1; }
+
+    /* ── Settings rows ── */
+    .settings-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 4px 0;
+    }
+    .settings-row + .settings-row { margin-top: 10px; }
+    .settings-row-label { flex: 1; }
+    .settings-row-title { font-size: 13px; font-weight: 600; color: #1c1c1e; display: block; }
+    .settings-row-sub { font-size: 11px; color: #999; display: block; margin-top: 2px; }
+
+    /* ── Toggle switch ── */
+    .settings-toggle {
+      position: relative; display: inline-block;
+      width: 44px; height: 24px; cursor: pointer; flex: 0 0 auto;
+    }
+    .settings-toggle input { display: none; }
+    .settings-toggle-track {
+      position: absolute; inset: 0;
+      background: #e5e5ea; border-radius: 12px;
+      transition: background 0.2s;
+    }
+    .settings-toggle input:checked + .settings-toggle-track { background: #d62d20; }
+    .settings-toggle-track::after {
+      content: ''; position: absolute;
+      top: 2px; left: 2px;
+      width: 20px; height: 20px;
+      background: #fff; border-radius: 50%;
+      transition: transform 0.2s;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+    .settings-toggle input:checked + .settings-toggle-track::after {
+      transform: translateX(20px);
+    }
+
+    /* ── Save destination radio ── */
+    .settings-destination-options {
+      display: flex; flex-direction: column; gap: 6px;
+      margin-top: 10px; padding-top: 10px;
+      border-top: 1px solid #f0f0f0;
+    }
+    .settings-dest-option {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; cursor: pointer; padding: 2px 0;
+      color: #1c1c1e;
+    }
+    .settings-dest-option input[type=radio] { accent-color: #d62d20; cursor: pointer; }
+
+    /* ── Drive warning ── */
+    .settings-drive-warning {
+      margin-top: 10px; padding: 9px 12px;
+      background: #fff8e1; border: 1px solid #ffe082;
+      border-radius: 8px; font-size: 12px; color: #795500;
+      line-height: 1.5;
+    }
+
+    /* ── Drive connect block ── */
+    .drive-connect-block {
+      margin-top: 10px; padding: 10px 12px;
+      background: #f9f9fb; border: 1px solid #e5e5ea;
+      border-radius: 10px;
+    }
+
+    /* Not-configured notice */
+    .drive-not-configured {
+      display: flex; align-items: flex-start; gap: 8px;
+      font-size: 12px; color: #888; line-height: 1.5;
+    }
+    .drive-not-configured-icon { flex: 0 0 auto; font-size: 14px; margin-top: 1px; }
+
+    /* Onboarding hint (shown when configured but not connected) */
+    .drive-onboarding {
+      margin-bottom: 10px; padding-bottom: 10px;
+      border-bottom: 1px solid #ececf0;
+    }
+    .drive-onboarding-title {
+      font-size: 12px; font-weight: 600; color: #1c1c1e;
+      margin-bottom: 6px; line-height: 1.4;
+    }
+    .drive-onboarding-steps {
+      margin: 0; padding-left: 18px;
+      font-size: 11px; color: #555; line-height: 1.8;
+    }
+
+    /* Status row */
+    .drive-status-row {
+      display: flex; align-items: center; gap: 7px;
+      font-size: 12px; font-weight: 600; color: #1c1c1e;
+    }
+    .drive-status-dot {
+      width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
+    }
+    .drive-status-dot--connected    { background: #2e7d32; }
+    .drive-status-dot--disconnected { background: #bbb; }
+    .drive-status-dot--loading      { background: #e65100; animation: pulse 1.5s infinite; }
+
+    .btn-drive-connect {
+      margin-top: 8px; width: 100%;
+      padding: 8px 12px; background: #4285f4; color: #fff;
+      border: none; border-radius: 8px; font-size: 12px; font-weight: 700;
+      cursor: pointer; transition: background 0.15s;
+    }
+    .btn-drive-connect:hover { background: #2f6cd4; opacity: 1; }
+    .btn-drive-connect:disabled { background: #aaa; cursor: default; }
+    .btn-drive-disconnect {
+      margin-top: 6px; width: 100%;
+      padding: 6px 12px; background: transparent; color: #999;
+      border: 1px solid #e5e5ea; border-radius: 8px;
+      font-size: 11px; font-weight: 600; cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .btn-drive-disconnect:hover { color: #d62d20; border-color: #d62d20; opacity: 1; }
+    .drive-err-text {
+      margin-top: 6px; font-size: 11px; color: #b42318; min-height: 14px;
+    }
+
+    /* ── Drive progress banner ── */
+    .drive-progress-banner {
+      position: fixed; bottom: 24px; left: 12px; right: 12px;
+      background: #1a1a2e; color: #e0e0ff;
+      padding: 9px 14px; border-radius: 10px;
+      font-size: 12px; font-weight: 500;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.25);
+      display: none; z-index: 100;
+      animation: fadeInUp 0.2s ease;
+    }
+    .drive-progress-banner.visible { display: block; }
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Drive history badges ── */
+    .hi-badge--drive-err { background: #fdecea; color: #b42318; }
+    .hi-badge--drive-pending { background: #f3e5f5; color: #7b1fa2; }
+    .hi-badge--drive-ok { background: #e8f5e9; color: #2e7d32; text-decoration: none; }
+    .hi-badge--drive-ok:hover { text-decoration: underline; }
+
+    /* ── Retry Drive button ── */
+    .btn-retry-drive {
+      flex: none; width: auto; padding: 3px 8px;
+      font-size: 10px; font-weight: 700;
+      background: #fdecea; color: #b42318;
+      border: 1px solid #f3c2bd; border-radius: 6px;
+      cursor: pointer; white-space: nowrap; transition: background 0.15s;
+    }
+    .btn-retry-drive:hover { background: #f3c2bd; opacity: 1; }
+
+    /* ── Recording subtitle ── */
+    #recording-what {
+      font-size: 11px; color: #999;
+      margin-top: 6px; text-align: center;
+      min-height: 14px; line-height: 1.4;
+    }
+
+    /* ── History asset badges ── */
+    .hi-asset-badges {
+      display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;
+    }
+    .hi-badge {
+      display: inline-flex; align-items: center;
+      font-size: 9px; font-weight: 700; padding: 2px 6px;
+      border-radius: 5px; text-transform: uppercase; letter-spacing: 0.3px;
+      white-space: nowrap;
+    }
+    .hi-badge--audio      { background: #e3f2fd; color: #1565c0; }
+    .hi-badge--video      { background: #e8f5e9; color: #2e7d32; }
+    .hi-badge--video-err  { background: #fdecea; color: #b42318; }
+    .hi-badge--drive      { background: #f3e5f5; color: #6a1b9a; }
+
+    /* ── Video error notice ── */
+    .video-error-notice {
+      margin-top: 8px; padding: 8px 10px;
+      background: #fdecea; border: 1px solid #f3c2bd;
+      border-radius: 8px; font-size: 12px; color: #b42318;
+      line-height: 1.4;
+    }
   </style>
 </head>
 <body>
@@ -553,7 +848,8 @@
 
   <nav class="tab-bar">
     <button class="tab-btn active" data-tab="meetings">Встречи</button>
-    <button class="tab-btn" data-tab="tags">Теги</button>
+    <button class="tab-btn" data-tab="files">Файлы</button>
+    <button class="tab-btn" data-tab="settings">Настройки</button>
   </nav>
 
   <!-- ── Tab: Встречи ── -->
@@ -570,43 +866,43 @@
           <button class="btn-primary" id="btn-record">⏺ Начать запись</button>
           <button class="btn-secondary" id="btn-open-recordings" style="flex: 0 0 auto; padding: 9px 12px; font-size: 12px;">📁 Записи</button>
         </div>
+        <div id="recording-what"></div>
       </div>
 
-      <!-- File upload -->
-      <div class="card">
-        <div class="card-title">Транскрибировать файл</div>
-        <input type="file" id="file-input" accept="audio/*,video/*,.mp3,.mp4,.m4a,.wav,.webm,.ogg,.flac" style="display:none">
-        <div class="file-drop-area" id="file-drop-area">
-          <div class="file-drop-icon">📁</div>
-          <div class="file-drop-label">Нажми или перетащи файл<br><strong>Аудио или видео</strong> · до 25 МБ</div>
+      <!-- Processing progress (meetings) -->
+      <div class="processing-progress" id="meeting-progress-block" style="display:none;">
+        <div class="processing-progress-stage" id="meeting-progress-stage">Обработка...</div>
+        <div class="processing-progress-bar-wrap">
+          <div class="processing-progress-bar" id="meeting-progress-bar"></div>
         </div>
-        <div class="file-chosen-name" id="file-chosen-name" style="display:none"></div>
-        <div id="upload-status"></div>
-        <div class="actions" id="file-actions" style="display:none; margin-top:8px;">
-          <button class="btn-primary" id="btn-transcribe-file">▶ Транскрибировать</button>
-          <button class="btn-secondary" id="btn-cancel-file">Отмена</button>
+        <div class="processing-progress-meta">
+          <span id="meeting-progress-percent">0%</span>
+          <span class="processing-progress-remaining" id="meeting-progress-time"></span>
         </div>
+        <div class="processing-progress-hint">Время может отличаться из-за лимитов Groq и размера файла.</div>
+      </div>
+
+      <!-- Summary -->
+      <div class="card" id="summary-card" style="display:none;">
+        <div class="card-header">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <button class="btn-back" id="btn-back-from-history" style="display:none;">← Назад</button>
+            <span class="card-title" style="margin:0;">Саммари</span>
+          </div>
+          <button class="btn-copy" id="btn-copy-prompt">Копировать</button>
+        </div>
+        <div id="summary-text" class="empty">Появится вместе с транскриптом...</div>
+        <div class="summary-error" id="summary-error" style="display:none;"></div>
+        <button class="btn-show-summary" id="btn-show-summary-full" style="display:none;">Показать полностью</button>
       </div>
 
       <!-- Transcript -->
       <div class="card" id="transcript-card" style="display:none;">
         <div class="card-header">
-          <div style="display:flex; align-items:center; gap:10px;">
-            <button class="btn-back" id="btn-back-from-history" style="display:none;">← Назад</button>
-            <span class="card-title" style="margin:0;">Транскрипт</span>
-          </div>
+          <span class="card-title" style="margin:0;">Транскрипт</span>
           <button class="btn-copy" id="btn-copy-transcript">Копировать</button>
         </div>
         <div id="transcript-text" class="empty">Появится после остановки записи...</div>
-      </div>
-
-      <!-- Summary -->
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">Транскрипт + промпт<br>для саммари</span>
-          <button class="btn-copy" id="btn-copy-prompt">Копировать</button>
-        </div>
-        <div id="summary-text" class="empty">Появится вместе с транскриптом...</div>
       </div>
 
       <!-- Pending recordings -->
@@ -622,26 +918,195 @@
         <div class="card-header" style="margin-bottom:10px;">
           <span class="card-title" style="margin:0;">История встреч</span>
           <div style="display:flex; gap:6px;">
-            <button class="btn-history-action" id="btn-export-history" title="Сохранить историю в файл">⬇ Экспорт</button>
-            <button class="btn-history-action" id="btn-import-history" title="Восстановить из файла">⬆ Импорт</button>
-            <input type="file" id="import-file-input" accept=".json" style="display:none">
+            <button class="btn-history-action" id="btn-export-history-meetings" title="Сохранить историю в файл">⬇ Экспорт</button>
+            <button class="btn-history-action" id="btn-import-history-meetings" title="Восстановить из файла">⬆ Импорт</button>
+            <input type="file" id="import-file-input-meetings" accept=".json" style="display:none">
           </div>
         </div>
         <div class="history-filter-wrap">
-          <select id="history-tag-filter">
+          <select id="history-tag-filter-meetings">
             <option value="">Все теги</option>
           </select>
         </div>
         <div class="history-search-wrap">
-          <input type="text" id="history-search" placeholder="🔍 Поиск по транскрипту, дате или тегам...">
+          <input type="text" id="history-search-meetings" placeholder="🔍 Поиск по транскрипту, дате или тегам...">
         </div>
-        <div id="import-status" style="font-size:11px; color:#888; min-height:14px; margin-bottom:4px;"></div>
-        <ul id="history-list">
+        <div id="import-status-meetings" style="font-size:11px; color:#888; min-height:14px; margin-bottom:4px;"></div>
+        <ul id="history-list-meetings" class="history-list">
           <li class="empty" style="display:block; padding:8px 0;">Пока нет записей</li>
         </ul>
+        <button class="btn-history-toggle" id="btn-history-toggle-meetings" style="display:none;">Показать всю историю</button>
       </div>
 
-      <!-- API key settings -->
+    </div>
+  </div>
+
+  <!-- ── Tab: Файлы ── -->
+  <div class="tab-content" id="tab-files">
+    <div class="inner">
+
+      <!-- File upload -->
+      <div class="card">
+        <div class="card-title">Транскрибация файла</div>
+        <input type="file" id="file-input" accept="audio/*,video/*,.mp3,.mp4,.m4a,.wav,.webm,.ogg,.flac" style="display:none">
+        <div class="file-drop-area" id="file-drop-area">
+          <div class="file-drop-icon">📁</div>
+          <div class="file-drop-label">Нажми или перетащи файл<br><strong>Аудио или видео</strong></div>
+          <div class="file-drop-hint">Файлы до 24 МБ отправляются сразу. Большие аудио делятся на части, большие видео сначала преобразуются в аудио.</div>
+          <div class="file-drop-formats">Поддерживаемые форматы: mp3, mp4, mpeg, mpga, m4a, wav, webm, ogg.</div>
+        </div>
+        <div class="file-chosen-name" id="file-chosen-name" style="display:none"></div>
+        <div id="upload-status"></div>
+        <div class="actions" id="file-actions" style="display:none; margin-top:8px;">
+          <button class="btn-primary" id="btn-transcribe-file">▶ Транскрибировать</button>
+          <button class="btn-secondary" id="btn-cancel-file">Отмена</button>
+        </div>
+        <!-- Processing progress (files) -->
+        <div class="processing-progress" id="file-progress-block" style="display:none;">
+          <div class="processing-progress-stage" id="file-progress-stage">Обработка...</div>
+          <div class="processing-progress-bar-wrap">
+            <div class="processing-progress-bar" id="file-progress-bar"></div>
+          </div>
+          <div class="processing-progress-meta">
+            <span id="file-progress-percent">0%</span>
+            <span class="processing-progress-remaining" id="file-progress-time"></span>
+          </div>
+          <div class="processing-progress-hint">Время может отличаться из-за лимитов Groq и размера файла.</div>
+        </div>
+      </div>
+
+      <!-- File summary -->
+      <div class="card" id="file-summary-card" style="display:none;">
+        <div class="card-header">
+          <span class="card-title" style="margin:0;">Саммари</span>
+          <button class="btn-copy" id="btn-copy-file-prompt">Копировать</button>
+        </div>
+        <div id="file-summary-text" class="empty">Появится вместе с транскриптом...</div>
+        <div class="summary-error" id="file-summary-error" style="display:none;"></div>
+        <button class="btn-show-summary" id="btn-show-file-summary-full" style="display:none;">Показать полностью</button>
+      </div>
+
+      <!-- File transcript -->
+      <div class="card" id="file-transcript-card" style="display:none;">
+        <div class="card-header">
+          <span class="card-title" style="margin:0;">Транскрипт</span>
+          <button class="btn-copy" id="btn-copy-file-transcript">Копировать</button>
+        </div>
+        <div id="file-transcript-text" class="empty">Появится после транскрибации файла...</div>
+      </div>
+
+      <!-- History -->
+      <div class="card">
+        <div class="card-header" style="margin-bottom:10px;">
+          <span class="card-title" style="margin:0;">История встреч</span>
+          <div style="display:flex; gap:6px;">
+            <button class="btn-history-action" id="btn-export-history-files" title="Сохранить историю в файл">⬇ Экспорт</button>
+            <button class="btn-history-action" id="btn-import-history-files" title="Восстановить из файла">⬆ Импорт</button>
+            <input type="file" id="import-file-input-files" accept=".json" style="display:none">
+          </div>
+        </div>
+        <div class="history-filter-wrap">
+          <select id="history-tag-filter-files">
+            <option value="">Все теги</option>
+          </select>
+        </div>
+        <div class="history-search-wrap">
+          <input type="text" id="history-search-files" placeholder="🔍 Поиск по транскрипту, дате или тегам...">
+        </div>
+        <div id="import-status-files" style="font-size:11px; color:#888; min-height:14px; margin-bottom:4px;"></div>
+        <ul id="history-list-files" class="history-list">
+          <li class="empty" style="display:block; padding:8px 0;">Пока нет записей</li>
+        </ul>
+        <button class="btn-history-toggle" id="btn-history-toggle-files" style="display:none;">Показать всю историю</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── Tab: Настройки ── -->
+  <div class="tab-content" id="tab-settings">
+    <div class="inner">
+
+      <!-- Recording settings -->
+      <div class="card">
+        <div class="card-title">Запись</div>
+        <div class="settings-row">
+          <div class="settings-row-label">
+            <span class="settings-row-title">Сохранять видео встречи</span>
+            <span class="settings-row-sub">Файл .webm с видео и аудио</span>
+          </div>
+          <label class="settings-toggle">
+            <input type="checkbox" id="setting-save-video" checked>
+            <span class="settings-toggle-track"></span>
+          </label>
+        </div>
+        <div class="settings-destination-options">
+          <label class="settings-dest-option">
+            <input type="radio" name="save-destination" id="dest-local" value="local" checked>
+            <span>На компьютер</span>
+          </label>
+          <label class="settings-dest-option">
+            <input type="radio" name="save-destination" id="dest-drive" value="google_drive">
+            <span>Google Drive</span>
+          </label>
+        </div>
+        <!-- Drive connection block (visible when Google Drive selected) -->
+        <div class="drive-connect-block" id="drive-connect-block" style="display:none;">
+
+          <!-- State: client_id не настроен в этой сборке -->
+          <div class="drive-not-configured" id="drive-not-configured" style="display:none;">
+            <span class="drive-not-configured-icon">⚙️</span>
+            <span>Google Drive не настроен в этой сборке расширения. Обратитесь к разработчику.</span>
+          </div>
+
+          <!-- State: client_id настроен — показываем онбординг и статус -->
+          <div id="drive-configured-block" style="display:none;">
+            <div class="drive-onboarding" id="drive-onboarding" style="display:none;">
+              <div class="drive-onboarding-title">Чтобы загружать записи в Google Drive:</div>
+              <ol class="drive-onboarding-steps">
+                <li>Нажмите «Подключить Google Drive»</li>
+                <li>Выберите Google-аккаунт</li>
+                <li>Разрешите ECHO создавать файлы на Google Drive</li>
+                <li>Готово — записи будут загружаться в папку ECHO Recordings</li>
+              </ol>
+            </div>
+            <div class="drive-status-row">
+              <span class="drive-status-dot drive-status-dot--disconnected" id="drive-status-dot"></span>
+              <span id="drive-status-text">Проверяю...</span>
+            </div>
+            <div class="drive-err-text" id="drive-err-text"></div>
+            <button class="btn-drive-connect" id="btn-drive-connect" style="display:none;">Подключить Google Drive</button>
+            <button class="btn-drive-disconnect" id="btn-drive-disconnect" style="display:none;">Отключить Google Drive</button>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Промпт саммаризации</div>
+        <textarea class="settings-textarea" id="summary-prompt-input"></textarea>
+        <div class="settings-actions">
+          <button class="btn-primary" id="btn-summary-prompt-save">Сохранить</button>
+          <button class="btn-secondary" id="btn-summary-prompt-reset">Сбросить</button>
+        </div>
+        <div class="settings-saved" id="summary-prompt-saved"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Управление тегами</div>
+        <div class="tag-mgmt-add-row">
+          <input type="text" id="new-tag-input" placeholder="Название тега..." maxlength="30">
+          <button class="btn-tag-add" id="btn-add-tag">+ Добавить</button>
+        </div>
+        <div id="preset-tags-list">
+          <div class="tags-empty">Нет тегов. Добавь первый!</div>
+        </div>
+        <div class="tag-hint">
+          Теги используются для фильтрации встреч в истории.<br>
+          После транскрипции они подбираются автоматически.
+        </div>
+      </div>
+
       <div class="card api-settings">
         <div style="display:flex; align-items:center; justify-content:space-between;">
           <span class="card-title" style="margin:0;">Groq API</span>
@@ -660,39 +1125,19 @@
           <div class="api-saved" id="api-saved">✓ Ключ сохранён</div>
         </div>
       </div>
-
-    </div>
-  </div>
-
-  <!-- ── Tab: Теги ── -->
-  <div class="tab-content" id="tab-tags">
-    <div class="inner">
-      <div class="card">
-        <div class="card-title">Управление тегами</div>
-        <div class="tag-mgmt-add-row">
-          <input type="text" id="new-tag-input" placeholder="Название тега..." maxlength="30">
-          <button class="btn-tag-add" id="btn-add-tag">+ Добавить</button>
-        </div>
-        <div id="preset-tags-list">
-          <div class="tags-empty">Нет тегов. Добавь первый!</div>
-        </div>
-        <div class="tag-hint">
-          Теги используются для фильтрации встреч в истории.<br>
-          После транскрипции они подбираются автоматически.
-        </div>
-      </div>
     </div>
   </div>
 
 </div><!-- /main-screen -->
 
 <div class="copied-toast" id="copied-toast">Скопировано ✓</div>
+<div class="drive-progress-banner" id="drive-progress-banner"></div>
 
 <footer style="
   position: fixed; bottom: 10px; right: 14px;
   font-size: 10px; color: #ccc;
   pointer-events: none; user-select: none;
-">© Гапоненко Дмитрий</footer>
+">ECHO v1.2 beta · © Гапоненко Дмитрий</footer>
 
 <script src="db.js"></script>
 <script src="sidepanel.js"></script>

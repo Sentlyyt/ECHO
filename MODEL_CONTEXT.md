@@ -162,12 +162,46 @@ Relevant permissions in `manifest.json`:
 - `clipboardWrite` for copying the prompt
 - `activeTab`, `tabs` for tab interaction
 - `sidePanel` for the main UI
+- `identity` for Google OAuth via `chrome.identity.getAuthToken`
 
 Host permissions:
 
 - `https://telemost.yandex.ru/*`
 - `https://telemost.yandex.com/*`
 - `https://api.groq.com/*`
+- `https://www.googleapis.com/*` for Drive API calls
+- `https://accounts.google.com/*` for token revocation
+
+The `oauth2` block in `manifest.json` holds a placeholder `client_id`.  
+The `"key"` field (stable Extension ID) is **not committed** — each developer generates it locally.  
+See `GOOGLE_DRIVE_SETUP.md` for the full setup procedure.
+
+## Google Drive integration
+
+`background.js` contains all Drive logic after the `emitHistoryUpdated` function:
+
+- `getDriveToken(interactive)` — wraps `chrome.identity.getAuthToken`
+- `checkDriveConnected()` / `connectDriveInteractive()` / `disconnectDrive()`
+- `buildDriveFolderName(meeting)` — produces `"YYYY-MM-DD - Title"`
+- `createDriveFolder(name, token)` — Drive v3 file create
+- `uploadTextToDrive(fileName, text, folderId, token)` — multipart upload
+- `uploadBinaryToDrive(fileName, mimeType, bytes, folderId, token, onProgress)` — resumable upload in 5 MB chunks
+- `uploadMeetingAssetsToDrive(meeting)` — orchestrates full upload: folder → transcript → summary → audio → video
+- `emitDriveProgress(meetingId, status)` — broadcasts `driveUploadProgress` to sidepanel
+
+`exportMeetingAssets` branches on `meeting.saveDestination`:
+- `'google_drive'` → calls `uploadMeetingAssetsToDrive`, returns early (no local download)
+- `'local'` → original `chrome.downloads` path
+
+Meeting objects gain four Drive fields:
+- `driveFolderId` — Google Drive folder ID
+- `driveFolderUrl` — direct folder link (`drive.google.com/drive/folders/...`)
+- `driveUploadStatus` — `'pending'` | `'uploading'` | `'done'` | `'error'` | `'not_configured'`
+- `driveUploadError` — error message if status is `'error'`
+
+Message actions added: `checkDriveStatus`, `connectDrive`, `disconnectDrive`, `retryDriveUpload`, `driveUploadProgress`.
+
+Setup instructions: `GOOGLE_DRIVE_SETUP.md`.
 
 ## File map
 

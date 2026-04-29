@@ -4,11 +4,25 @@ let recording = false;
 let timerInterval = null;
 let seconds = 0;
 let currentTranscript = '';
-let currentPrompt = '';
+let currentSummary = '';
+let currentSummaryPrompt = '';
+let currentSummaryError = '';
+let currentMeetingId = null;
 let viewingHistoryTranscript = false;
 
 const DEFAULT_TRANSCRIPT_PLACEHOLDER = 'Появится после остановки записи...';
 const DEFAULT_SUMMARY_PLACEHOLDER = 'Появится вместе с транскриптом...';
+const SUMMARY_PREVIEW_LIMIT = 900;
+const SUMMARY_PROMPT_STORAGE_KEY = 'summaryBasePrompt';
+const DEFAULT_SUMMARY_PROMPT = `Сделай саммари деловой встречи на русском языке.
+
+Структура:
+1. Краткое резюме на 3-5 предложений.
+2. Ключевые решения и договоренности.
+3. Задачи: что сделать, кто отвечает, срок, если он есть.
+4. Важные риски, вопросы и открытые хвосты.
+
+Пиши конкретно, без воды. Если в транскрипте нет данных для пункта, так и напиши.`;
 const MEETING_STATUS = {
   RECORDING: 'Идёт запись',
   RECORDED: 'Запись сохранена',
@@ -28,13 +42,47 @@ const statusBadge       = document.getElementById('status-badge');
 const recDot            = document.getElementById('rec-dot');
 const timerEl           = document.getElementById('timer');
 const transcriptCard    = document.getElementById('transcript-card');
+const summaryCard       = document.getElementById('summary-card');
 const transcriptEl      = document.getElementById('transcript-text');
 const summaryEl         = document.getElementById('summary-text');
+const summaryErrorEl    = document.getElementById('summary-error');
+const btnShowSummaryFull = document.getElementById('btn-show-summary-full');
 const btnBackFromHistory = document.getElementById('btn-back-from-history');
 const pendingRecordingsCard = document.getElementById('pending-recordings-card');
 const pendingRecordingsList = document.getElementById('pending-recordings-list');
-const historyList       = document.getElementById('history-list');
 const copiedToast       = document.getElementById('copied-toast');
+const fileTranscriptCard = document.getElementById('file-transcript-card');
+const fileSummaryCard    = document.getElementById('file-summary-card');
+const fileTranscriptEl   = document.getElementById('file-transcript-text');
+const fileSummaryEl      = document.getElementById('file-summary-text');
+const fileSummaryErrorEl = document.getElementById('file-summary-error');
+const btnShowFileSummaryFull = document.getElementById('btn-show-file-summary-full');
+const historyViews = [
+  {
+    id: 'meetings',
+    list: document.getElementById('history-list-meetings'),
+    tagFilter: document.getElementById('history-tag-filter-meetings'),
+    search: document.getElementById('history-search-meetings'),
+    exportBtn: document.getElementById('btn-export-history-meetings'),
+    importBtn: document.getElementById('btn-import-history-meetings'),
+    importInput: document.getElementById('import-file-input-meetings'),
+    importStatus: document.getElementById('import-status-meetings'),
+    toggleBtn: document.getElementById('btn-history-toggle-meetings'),
+    expanded: false
+  },
+  {
+    id: 'files',
+    list: document.getElementById('history-list-files'),
+    tagFilter: document.getElementById('history-tag-filter-files'),
+    search: document.getElementById('history-search-files'),
+    exportBtn: document.getElementById('btn-export-history-files'),
+    importBtn: document.getElementById('btn-import-history-files'),
+    importInput: document.getElementById('import-file-input-files'),
+    importStatus: document.getElementById('import-status-files'),
+    toggleBtn: document.getElementById('btn-history-toggle-files'),
+    expanded: false
+  }
+].filter(view => view.list && view.tagFilter && view.search);
 
 // ── API key (setup screen) ──
 const setupKeyInput = document.getElementById('setup-key');
@@ -47,6 +95,10 @@ const apiPanel     = document.getElementById('api-panel');
 const apiKeyInput  = document.getElementById('api-key-input');
 const btnApiSave   = document.getElementById('btn-api-save');
 const apiSaved     = document.getElementById('api-saved');
+const summaryPromptInput = document.getElementById('summary-prompt-input');
+const btnSummaryPromptSave = document.getElementById('btn-summary-prompt-save');
+const btnSummaryPromptReset = document.getElementById('btn-summary-prompt-reset');
+const summaryPromptSaved = document.getElementById('summary-prompt-saved');
 
 // ── Init ──
 chrome.storage.local.get('groqApiKey', (data) => {
@@ -63,9 +115,11 @@ function showSetup() {
 function showMain() {
   setupScreen.style.display = 'none';
   mainScreen.style.display  = 'flex';
+  ensureSummaryPromptStored();
   renderTagFilter();
   renderHistory();
   syncRecordingState();
+  loadRecordingSettings();
 }
 
 // ── Setup screen ──
@@ -86,7 +140,188 @@ btnSetupSave.addEventListener('click', () => {
 });
 setupKeyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') btnSetupSave.click(); });
 
-// ── Settings panel ──
+// ── Recording settings ──
+
+const settingSaveVideo   = document.getElementById('setting-save-video');
+const destLocalRadio     = document.getElementById('dest-local');
+const destDriveRadio     = document.getElementById('dest-drive');
+const driveWarning       = document.getElementById('drive-warning');
+const recordingWhatEl    = document.getElementById('recording-what');
+
+function getRecordingSettingsLocal() {
+  return new Promise(resolve => {
+    chrome.storage.local.get(['saveVideo', 'saveDestination'], data => {
+      resolve({
+        saveVideo: data.saveVideo !== false,
+        saveDestination: data.saveDestination || 'local'
+      });
+    });
+  });
+}
+
+function saveRecordingSettingsLocal(settings) {
+  chrome.storage.local.set({
+    saveVideo: settings.saveVideo,
+    saveDestination: settings.saveDestination
+  });
+}
+
+async function loadRecordingSettings() {
+  const settings = await getRecordingSettingsLocal();
+  if (settingSaveVideo)  settingSaveVideo.checked = settings.saveVideo;
+  if (destLocalRadio)    destLocalRadio.checked  = settings.saveDestination === 'local';
+  if (destDriveRadio)    destDriveRadio.checked  = settings.saveDestination === 'google_drive';
+  applyDriveWarning(settings.saveDestination);
+  updateRecordingWhatText(settings);
+}
+
+function updateRecordingWhatTextWithDrive(settings, driveConnected) {
+  if (!recordingWhatEl) return;
+  if (!settings) { recordingWhatEl.textContent = ''; return; }
+  const videoLabel = settings.saveVideo ? ', видео' : '';
+  let destLabel;
+  if (settings.saveDestination === 'google_drive') {
+    destLabel = driveConnected ? ' → Google Drive' : ' → Google Drive (не подключён)';
+  } else {
+    destLabel = ' → компьютер';
+  }
+  recordingWhatEl.textContent = `Сохраняем: аудио${videoLabel} и транскрипт${destLabel}`;
+}
+
+// ── Drive connection UI ──
+const driveConnectBlock   = document.getElementById('drive-connect-block');
+const driveStatusDot      = document.getElementById('drive-status-dot');
+const driveStatusText     = document.getElementById('drive-status-text');
+const driveErrText        = document.getElementById('drive-err-text');
+const btnDriveConnect     = document.getElementById('btn-drive-connect');
+const btnDriveDisconnect  = document.getElementById('btn-drive-disconnect');
+const driveProgressBanner = document.getElementById('drive-progress-banner');
+const driveNotConfigured  = document.getElementById('drive-not-configured');
+const driveConfiguredBlock = document.getElementById('drive-configured-block');
+const driveOnboarding     = document.getElementById('drive-onboarding');
+
+let driveProgressTimer = null;
+
+function isDriveConfiguredInManifest() {
+  const manifest = chrome.runtime.getManifest ? chrome.runtime.getManifest() : {};
+  const clientId = manifest.oauth2?.client_id || '';
+  return clientId.endsWith('.apps.googleusercontent.com')
+    && !clientId.includes('REPLACE_WITH')
+    && !clientId.includes('YOUR_GOOGLE_CLIENT_ID')
+    && !clientId.includes('TODO');
+}
+
+function setDriveSetupState(configured) {
+  if (driveNotConfigured) driveNotConfigured.style.display = configured ? 'none' : '';
+  if (driveConfiguredBlock) driveConfiguredBlock.style.display = configured ? '' : 'none';
+  if (driveOnboarding) driveOnboarding.style.display = configured ? '' : 'none';
+}
+
+function applyDriveWarning(destination) {
+  if (!driveConnectBlock) return;
+  if (destination === 'google_drive') {
+    driveConnectBlock.style.display = '';
+    const configured = isDriveConfiguredInManifest();
+    setDriveSetupState(configured);
+    if (configured) loadDriveStatus();
+  } else {
+    driveConnectBlock.style.display = 'none';
+  }
+}
+
+function setDriveStatusUI(connected, loading = false) {
+  if (!driveStatusDot || !driveStatusText) return;
+  driveStatusDot.className = 'drive-status-dot ' + (
+    loading ? 'drive-status-dot--loading' :
+    connected ? 'drive-status-dot--connected' : 'drive-status-dot--disconnected'
+  );
+  driveStatusText.textContent = loading ? 'Проверяю...' :
+    connected ? 'Google Drive подключён' : 'Google Drive не подключён';
+  if (btnDriveConnect) btnDriveConnect.style.display = (!loading && !connected) ? '' : 'none';
+  if (btnDriveDisconnect) btnDriveDisconnect.style.display = (!loading && connected) ? '' : 'none';
+  if (driveErrText) driveErrText.textContent = '';
+}
+
+async function loadDriveStatus() {
+  setDriveStatusUI(false, true);
+  chrome.runtime.sendMessage({ action: 'checkDriveStatus' }, (resp) => {
+    if (chrome.runtime.lastError) { setDriveStatusUI(false); return; }
+    setDriveStatusUI(!!(resp && resp.connected));
+  });
+}
+
+btnDriveConnect?.addEventListener('click', () => {
+  if (btnDriveConnect.disabled) return;
+  btnDriveConnect.disabled = true;
+  btnDriveConnect.textContent = 'Подключаю...';
+  chrome.runtime.sendMessage({ action: 'connectDrive' }, (resp) => {
+    btnDriveConnect.disabled = false;
+    btnDriveConnect.textContent = 'Подключить Google Drive';
+    if (chrome.runtime.lastError || !resp || !resp.ok) {
+      const err = (resp && resp.error) || (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'Не удалось подключить';
+      setDriveStatusUI(false);
+      if (driveErrText) driveErrText.textContent = '❌ ' + err;
+    } else {
+      setDriveStatusUI(true);
+    }
+  });
+});
+
+btnDriveDisconnect?.addEventListener('click', () => {
+  chrome.runtime.sendMessage({ action: 'disconnectDrive' }, () => {
+    setDriveStatusUI(false);
+  });
+});
+
+function showDriveProgress(status) {
+  if (!driveProgressBanner) return;
+  driveProgressBanner.textContent = status;
+  driveProgressBanner.classList.add('visible');
+  clearTimeout(driveProgressTimer);
+  const isDone = /^(Готово|Видео загружено|❌)/i.test(status);
+  if (isDone) {
+    driveProgressTimer = setTimeout(() => {
+      driveProgressBanner.classList.remove('visible');
+    }, 5000);
+  }
+}
+
+function updateRecordingWhatText(settings) {
+  if (!recordingWhatEl) return;
+  if (!settings) { recordingWhatEl.textContent = ''; return; }
+  const videoLabel = settings.saveVideo ? ', видео' : '';
+  const destLabel  = settings.saveDestination === 'google_drive'
+    ? ' → Google Drive*'
+    : ' → компьютер';
+  recordingWhatEl.textContent = `Сохраняем: аудио${videoLabel} и транскрипт${destLabel}`;
+}
+
+settingSaveVideo?.addEventListener('change', async () => {
+  const settings = await getRecordingSettingsLocal();
+  settings.saveVideo = settingSaveVideo.checked;
+  saveRecordingSettingsLocal(settings);
+  updateRecordingWhatText(settings);
+});
+
+destLocalRadio?.addEventListener('change', async () => {
+  if (!destLocalRadio.checked) return;
+  const settings = await getRecordingSettingsLocal();
+  settings.saveDestination = 'local';
+  saveRecordingSettingsLocal(settings);
+  applyDriveWarning('local');
+  updateRecordingWhatText(settings);
+});
+
+destDriveRadio?.addEventListener('change', async () => {
+  if (!destDriveRadio.checked) return;
+  const settings = await getRecordingSettingsLocal();
+  settings.saveDestination = 'google_drive';
+  saveRecordingSettingsLocal(settings);
+  applyDriveWarning('google_drive');
+  updateRecordingWhatText(settings);
+});
+
+// ── API key settings ──
 btnApiToggle.addEventListener('click', () => {
   const open = apiPanel.classList.toggle('open');
   if (open) {
@@ -111,8 +346,61 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     const tab = btn.dataset.tab;
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
     document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${tab}`));
-    if (tab === 'tags') renderPresetTags();
+    if (tab === 'settings') {
+      loadSummaryPromptSettings();
+      renderPresetTags();
+      loadRecordingSettings();
+    }
   });
+});
+
+function setActiveTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${tab}`));
+  if (tab === 'settings') {
+    loadSummaryPromptSettings();
+    renderPresetTags();
+    loadRecordingSettings();
+  }
+}
+
+function getSummaryBasePrompt() {
+  return new Promise(resolve => chrome.storage.local.get(SUMMARY_PROMPT_STORAGE_KEY, data => {
+    resolve(String(data[SUMMARY_PROMPT_STORAGE_KEY] || DEFAULT_SUMMARY_PROMPT).trim() || DEFAULT_SUMMARY_PROMPT);
+  }));
+}
+
+function saveSummaryBasePrompt(value) {
+  return new Promise(resolve => chrome.storage.local.set({ [SUMMARY_PROMPT_STORAGE_KEY]: value }, resolve));
+}
+
+function ensureSummaryPromptStored() {
+  chrome.storage.local.get(SUMMARY_PROMPT_STORAGE_KEY, data => {
+    if (!data[SUMMARY_PROMPT_STORAGE_KEY]) {
+      chrome.storage.local.set({ [SUMMARY_PROMPT_STORAGE_KEY]: DEFAULT_SUMMARY_PROMPT });
+    }
+  });
+}
+
+async function loadSummaryPromptSettings() {
+  if (!summaryPromptInput) return;
+  summaryPromptInput.value = await getSummaryBasePrompt();
+  if (summaryPromptSaved) summaryPromptSaved.textContent = '';
+}
+
+btnSummaryPromptSave?.addEventListener('click', async () => {
+  const value = summaryPromptInput.value.trim() || DEFAULT_SUMMARY_PROMPT;
+  await saveSummaryBasePrompt(value);
+  summaryPromptInput.value = value;
+  summaryPromptSaved.textContent = 'Промпт сохранён';
+  setTimeout(() => { summaryPromptSaved.textContent = ''; }, 2000);
+});
+
+btnSummaryPromptReset?.addEventListener('click', async () => {
+  await saveSummaryBasePrompt(DEFAULT_SUMMARY_PROMPT);
+  summaryPromptInput.value = DEFAULT_SUMMARY_PROMPT;
+  summaryPromptSaved.textContent = 'Сброшено к дефолту';
+  setTimeout(() => { summaryPromptSaved.textContent = ''; }, 2000);
 });
 
 // ── Timer ──
@@ -147,9 +435,48 @@ function setStatus(text, type = '') {
   statusBadge.className = type;
 }
 
-function setPromptOutput(text, isEmpty = false) {
+function normalizeMeetingSummary(meeting) {
+  const summary = meeting.summary || '';
+  const summaryPrompt = meeting.summaryPrompt || meeting.prompt || '';
+  const summaryError = meeting.summaryError || '';
+  return { summary, summaryPrompt, summaryError };
+}
+
+function setSummaryOutput(summary, options = {}) {
+  const isEmpty = !!options.isEmpty || !summary;
+  const isPreview = !!options.preview && String(summary || '').length > SUMMARY_PREVIEW_LIMIT;
+  const text = isPreview ? `${String(summary).slice(0, SUMMARY_PREVIEW_LIMIT).trim()}...` : (summary || DEFAULT_SUMMARY_PLACEHOLDER);
+
+  if (summaryCard) summaryCard.style.display = '';
   summaryEl.textContent = text;
-  summaryEl.className = isEmpty ? 'empty' : '';
+  summaryEl.className = isEmpty ? 'empty' : (isPreview ? 'summary-preview' : '');
+  if (summaryErrorEl) {
+    summaryErrorEl.style.display = options.error ? 'block' : 'none';
+    summaryErrorEl.textContent = options.error ? `Саммари не сгенерировалось: ${options.error}` : '';
+  }
+  if (btnShowSummaryFull) {
+    btnShowSummaryFull.style.display = options.showFull && !viewingHistoryTranscript ? 'block' : 'none';
+  }
+}
+
+function setFileResultOutput(transcript, summary, options = {}) {
+  if (!fileTranscriptCard || !fileSummaryCard) return;
+  fileSummaryCard.style.display = '';
+  fileTranscriptCard.style.display = '';
+  const isEmpty = !!options.isEmpty || !summary;
+  const isPreview = !!options.preview && String(summary || '').length > SUMMARY_PREVIEW_LIMIT;
+  const summaryText = isPreview ? `${String(summary).slice(0, SUMMARY_PREVIEW_LIMIT).trim()}...` : (summary || DEFAULT_SUMMARY_PLACEHOLDER);
+  fileTranscriptEl.textContent = transcript || DEFAULT_TRANSCRIPT_PLACEHOLDER;
+  fileTranscriptEl.className = !transcript ? 'empty' : '';
+  fileSummaryEl.textContent = summaryText;
+  fileSummaryEl.className = isEmpty ? 'empty' : (isPreview ? 'summary-preview' : '');
+  if (fileSummaryErrorEl) {
+    fileSummaryErrorEl.style.display = options.error ? 'block' : 'none';
+    fileSummaryErrorEl.textContent = options.error ? `Саммари не сгенерировалось: ${options.error}` : '';
+  }
+  if (btnShowFileSummaryFull) {
+    btnShowFileSummaryFull.style.display = options.showFull ? 'block' : 'none';
+  }
 }
 
 function applyRecordingState(state = {}) {
@@ -160,6 +487,7 @@ function applyRecordingState(state = {}) {
   btnRecord.disabled = false;
   if (active) {
     hideHistoryTranscriptView();
+    getRecordingSettingsLocal().then(updateRecordingWhatText);
     btnRecord.textContent = '⏹ Остановить';
     btnRecord.className = 'btn-secondary';
     recDot.style.display = 'inline-block';
@@ -168,11 +496,15 @@ function applyRecordingState(state = {}) {
     const elapsed = startedAt ? Math.floor((Date.now() - startedAt) / 1000) : 0;
     startTimerFrom(elapsed);
     transcriptCard.style.display = '';
+    summaryCard.style.display = '';
     currentTranscript = '';
-    currentPrompt = '';
+    currentSummary = '';
+    currentSummaryPrompt = '';
+    currentSummaryError = '';
+    currentMeetingId = null;
     transcriptEl.textContent = 'Запись идёт...';
     transcriptEl.className = 'empty';
-    setPromptOutput(DEFAULT_SUMMARY_PLACEHOLDER, true);
+    setSummaryOutput(DEFAULT_SUMMARY_PLACEHOLDER, { isEmpty: true });
   } else {
     btnRecord.textContent = '⏺ Начать запись';
     btnRecord.className = 'btn-primary';
@@ -182,7 +514,7 @@ function applyRecordingState(state = {}) {
     if (statusBadge.textContent === 'Запись') {
       setStatus('Ожидание', '');
     }
-    if (!viewingHistoryTranscript && transcriptEl.textContent === 'Запись идёт...' && !currentTranscript && !currentPrompt) {
+    if (!viewingHistoryTranscript && transcriptEl.textContent === 'Запись идёт...' && !currentTranscript && !currentSummary) {
       resetTranscriptView();
     }
   }
@@ -197,36 +529,67 @@ function syncRecordingState() {
 
 function resetTranscriptView() {
   currentTranscript = '';
-  currentPrompt = '';
+  currentSummary = '';
+  currentSummaryPrompt = '';
+  currentSummaryError = '';
+  currentMeetingId = null;
   transcriptCard.style.display = 'none';
+  summaryCard.style.display = 'none';
   transcriptEl.textContent = DEFAULT_TRANSCRIPT_PLACEHOLDER;
   transcriptEl.className = 'empty';
-  setPromptOutput(DEFAULT_SUMMARY_PLACEHOLDER, true);
+  setSummaryOutput(DEFAULT_SUMMARY_PLACEHOLDER, { isEmpty: true });
+  summaryCard.style.display = 'none';
 }
 
 function hideHistoryTranscriptView() {
   viewingHistoryTranscript = false;
-  transcriptCard.style.display = 'none';
   btnBackFromHistory.style.display = 'none';
 }
 
 function enterHistoryTranscriptView(meeting) {
   viewingHistoryTranscript = true;
+  setActiveTab('meetings');
+  summaryCard.style.display = '';
   transcriptCard.style.display = '';
   btnBackFromHistory.style.display = 'inline-flex';
+  currentMeetingId = meeting.id || null;
   currentTranscript = meeting.transcript || '';
-  currentPrompt = meeting.prompt || '';
+  const summaryData = normalizeMeetingSummary(meeting);
+  currentSummary = summaryData.summary;
+  currentSummaryPrompt = summaryData.summaryPrompt;
+  currentSummaryError = summaryData.summaryError;
   transcriptEl.textContent = currentTranscript || DEFAULT_TRANSCRIPT_PLACEHOLDER;
   transcriptEl.className = currentTranscript ? '' : 'empty';
-  summaryEl.textContent = currentPrompt || DEFAULT_SUMMARY_PLACEHOLDER;
-  summaryEl.className = currentPrompt ? '' : 'empty';
+  setSummaryOutput(currentSummary, { isEmpty: !currentSummary, error: currentSummaryError, preview: false, showFull: false });
+  setFileResultOutput(currentTranscript, currentSummary, { isEmpty: !currentTranscript && !currentSummary, error: currentSummaryError, preview: false, showFull: false });
   setStatus('Из истории', 'done');
+
+  // Show video error notice if video recording failed
+  renderVideoErrorNotice(meeting);
+}
+
+function renderVideoErrorNotice(meeting) {
+  // Remove any existing notice
+  const existing = document.getElementById('video-error-notice');
+  if (existing) existing.remove();
+
+  const hasVideo = Array.isArray(meeting.videoChunks) && meeting.videoChunks.length > 0;
+  const videoErr = meeting.videoError || '';
+  if (!hasVideo && videoErr && transcriptCard) {
+    const notice = document.createElement('div');
+    notice.id = 'video-error-notice';
+    notice.className = 'video-error-notice';
+    notice.textContent = `Транскрипт готов, но видео не удалось сохранить: ${videoErr}`;
+    transcriptCard.after(notice);
+  }
 }
 
 function exitHistoryTranscriptView() {
   hideHistoryTranscriptView();
   resetTranscriptView();
   setStatus('Ожидание', '');
+  const notice = document.getElementById('video-error-notice');
+  if (notice) notice.remove();
 }
 
 // ── Copy toast ──
@@ -366,10 +729,12 @@ btnRecord.addEventListener('click', () => {
       if (chrome.runtime.lastError || !resp || !resp.success) {
         setStatus('Ошибка', '');
         currentTranscript = '';
-        currentPrompt = '';
-        setPromptOutput(resp && resp.message
+        currentSummary = '';
+        currentSummaryPrompt = '';
+        currentSummaryError = '';
+        setSummaryOutput(resp && resp.message
           ? resp.message
-          : 'Запись нужно запускать кликом по иконке ECHO на активной вкладке Телемоста.');
+          : 'Запись нужно запускать кликом по иконке ECHO на активной вкладке Телемоста.', { isEmpty: true });
         return;
       }
       applyRecordingState(resp);
@@ -387,11 +752,26 @@ document.getElementById('btn-copy-transcript').addEventListener('click', () => {
   if (currentTranscript) copyText(currentTranscript);
 });
 document.getElementById('btn-copy-prompt').addEventListener('click', () => {
-  if (currentPrompt) copyText(currentPrompt);
+  if (currentSummary) copyText(currentSummary);
+});
+document.getElementById('btn-copy-file-transcript').addEventListener('click', () => {
+  if (currentTranscript) copyText(currentTranscript);
+});
+document.getElementById('btn-copy-file-prompt').addEventListener('click', () => {
+  if (currentSummary) copyText(currentSummary);
 });
 btnBackFromHistory.addEventListener('click', () => {
   if (viewingHistoryTranscript) exitHistoryTranscriptView();
 });
+
+btnShowSummaryFull?.addEventListener('click', () => openCurrentMeetingFromHistory());
+btnShowFileSummaryFull?.addEventListener('click', () => openCurrentMeetingFromHistory());
+
+async function openCurrentMeetingFromHistory() {
+  if (!currentMeetingId) return;
+  const meeting = allMeetings.find(x => x.id == currentMeetingId) || await dbGetMeeting(currentMeetingId);
+  if (meeting) enterHistoryTranscriptView(meeting);
+}
 
 // ── Messages from background ──
 chrome.runtime.onMessage.addListener((msg) => {
@@ -411,19 +791,32 @@ chrome.runtime.onMessage.addListener((msg) => {
     hideHistoryTranscriptView();
     applyRecordingState({ recording: false });
     setStatus('Обработка', 'processing');
+    summaryCard.style.display = '';
     transcriptCard.style.display = '';
     transcriptEl.textContent = '⏳ Транскрибирую...';
     transcriptEl.className = 'empty';
-    setPromptOutput('⏳ Формирую транскрипт и промпт...', true);
+    setSummaryOutput('⏳ Транскрибирую и готовлю саммари...', { isEmpty: true });
+    meetingTimer.start(EST_CHUNK_TRANSCRIPTION_MS * 3 + EST_FINAL_SUMMARY_MS);
+    meetingTimer.setStage('Транскрибирую запись...');
   }
 
   if (msg.action === 'chunkProgress') {
     hideHistoryTranscriptView();
+    summaryCard.style.display = '';
     transcriptCard.style.display = '';
-    const total = msg.total === '?' ? '' : ` из ${msg.total}`;
-    transcriptEl.textContent = `⏳ Транскрибирую часть ${msg.current}${total}...`;
+    const knownTotal = msg.total && msg.total !== '?';
+    const totalLabel = knownTotal ? ` из ${msg.total}` : '';
+    transcriptEl.textContent = `⏳ Транскрибирую часть ${msg.current}${totalLabel}...`;
     transcriptEl.className = 'empty';
-    setPromptOutput(`⏳ Обрабатываю часть ${msg.current}${total}...`, true);
+    setSummaryOutput(`⏳ Обрабатываю часть ${msg.current}${totalLabel}...`, { isEmpty: true });
+    if (knownTotal) {
+      const left = msg.total - msg.current + 1;
+      meetingTimer.setStage(`Транскрибирую часть ${msg.current} из ${msg.total}...`);
+      meetingTimer.setProgress(
+        ((msg.current - 1) / msg.total) * 78,
+        left * EST_CHUNK_TRANSCRIPTION_MS + EST_FINAL_SUMMARY_MS
+      );
+    }
   }
 
   if (msg.action === 'recordingDiscarded') {
@@ -434,30 +827,42 @@ chrome.runtime.onMessage.addListener((msg) => {
     transcriptEl.textContent = 'Короткая запись удалена.';
     transcriptEl.className = 'empty';
     setStatus('Удалено', '');
-    setPromptOutput('Короткая запись удалена.', true);
+    setSummaryOutput('Короткая запись удалена.', { isEmpty: true });
     renderHistory();
   }
 
   if (msg.action === 'retranscribing') {
     hideHistoryTranscriptView();
     setStatus('Обработка', 'processing');
+    summaryCard.style.display = '';
     transcriptCard.style.display = '';
     transcriptEl.textContent = '⏳ Повторная транскрипция...';
     transcriptEl.className = 'empty';
-    setPromptOutput('⏳ Повторно формирую транскрипт и промпт...', true);
+    setSummaryOutput('⏳ Повторно формирую транскрипт и саммари...', { isEmpty: true });
+    meetingTimer.start(EST_CHUNK_TRANSCRIPTION_MS * 3 + EST_FINAL_SUMMARY_MS);
+    meetingTimer.setStage('Повторная транскрипция...');
+  }
+
+  if (msg.action === 'summaryProgress') {
+    setSummaryOutput(`⏳ ${msg.status}`, { isEmpty: true });
+    parseSummaryStatusForTimer(msg.status, meetingTimer);
   }
 
   if (msg.action === 'transcriptReady') {
     hideHistoryTranscriptView();
     applyRecordingState({ recording: false });
+    summaryCard.style.display = '';
     transcriptCard.style.display = '';
+    currentMeetingId = msg.meetingId || null;
     currentTranscript = msg.transcript || '';
-    currentPrompt = msg.prompt || '';
+    currentSummary = msg.summary || '';
+    currentSummaryPrompt = msg.summaryPrompt || msg.prompt || '';
+    currentSummaryError = msg.summaryError || '';
     setStatus('Готово', 'done');
     transcriptEl.textContent = currentTranscript;
     transcriptEl.className = '';
-    summaryEl.textContent = currentPrompt;
-    summaryEl.className = '';
+    setSummaryOutput(currentSummary, { isEmpty: !currentSummary, error: currentSummaryError, preview: true, showFull: !!currentMeetingId && !!currentSummary });
+    meetingTimer.stop();
     renderHistory();
   }
 
@@ -466,9 +871,19 @@ chrome.runtime.onMessage.addListener((msg) => {
     applyRecordingState({ recording: false });
     setStatus('Ошибка', '');
     currentTranscript = '';
-    currentPrompt = '';
+    currentSummary = '';
+    currentSummaryPrompt = '';
+    currentSummaryError = '';
+    currentMeetingId = null;
+    summaryCard.style.display = '';
     transcriptCard.style.display = '';
-    setPromptOutput('❌ ' + msg.error);
+    setSummaryOutput('❌ ' + msg.error, { isEmpty: true });
+    meetingTimer.stop();
+  }
+
+  if (msg.action === 'driveUploadProgress') {
+    showDriveProgress(msg.status);
+    if (/готово|загружено/i.test(msg.status)) renderHistory();
   }
 });
 
@@ -476,6 +891,183 @@ window.addEventListener('focus', syncRecordingState);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) syncRecordingState();
 });
+
+// ── File transcription pipeline ──
+
+const FILE_TRANSCRIPTION_MAX = 24 * 1024 * 1024; // 24 MB
+const WAV_SAMPLE_RATE = 16000;                    // Whisper-optimal, mono
+
+function isVideoFile(file) {
+  return file.type.startsWith('video/');
+}
+
+async function decodeAudioBuffer(fileOrBlob) {
+  const arrayBuffer = await fileOrBlob.arrayBuffer();
+  const ctx = new AudioContext();
+  try {
+    return await ctx.decodeAudioData(arrayBuffer);
+  } finally {
+    ctx.close();
+  }
+}
+
+// Encodes a range [startSample, endSample) of an AudioBuffer as 16kHz mono 16-bit WAV
+function audioBufferRangeToWav(audioBuffer, startSample, endSample) {
+  const originalRate = audioBuffer.sampleRate;
+  const len = endSample - startSample;
+
+  // Mix down to mono
+  const mono = new Float32Array(len);
+  for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+    const src = audioBuffer.getChannelData(ch);
+    for (let i = 0; i < len; i++) {
+      mono[i] += src[startSample + i] / audioBuffer.numberOfChannels;
+    }
+  }
+
+  // Resample to WAV_SAMPLE_RATE via linear interpolation
+  const ratio = originalRate / WAV_SAMPLE_RATE;
+  const newLen = Math.round(len / ratio);
+  const resampled = new Float32Array(newLen);
+  for (let i = 0; i < newLen; i++) {
+    const src = i * ratio;
+    const lo = Math.floor(src);
+    const hi = Math.min(lo + 1, len - 1);
+    resampled[i] = mono[lo] + (mono[hi] - mono[lo]) * (src - lo);
+  }
+
+  // Convert to Int16 PCM
+  const pcm = new Int16Array(newLen);
+  for (let i = 0; i < newLen; i++) {
+    const s = Math.max(-1, Math.min(1, resampled[i]));
+    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+
+  // Build WAV container
+  const buf = new ArrayBuffer(44 + pcm.byteLength);
+  const v = new DataView(buf);
+  const w = (off, str) => { for (let i = 0; i < str.length; i++) v.setUint8(off + i, str.charCodeAt(i)); };
+  w(0, 'RIFF');
+  v.setUint32(4, 36 + pcm.byteLength, true);
+  w(8, 'WAVE');
+  w(12, 'fmt ');
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);           // PCM
+  v.setUint16(22, 1, true);           // mono
+  v.setUint32(24, WAV_SAMPLE_RATE, true);
+  v.setUint32(28, WAV_SAMPLE_RATE * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  w(36, 'data');
+  v.setUint32(40, pcm.byteLength, true);
+  new Uint8Array(buf, 44).set(new Uint8Array(pcm.buffer));
+
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+// Split an AudioBuffer into WAV Blob chunks each ≤ maxBytes
+function splitAudioBufferToWavChunks(audioBuffer, maxBytes = FILE_TRANSCRIPTION_MAX) {
+  const bytesPerSec = WAV_SAMPLE_RATE * 2; // mono 16-bit
+  const maxSecs = Math.floor((maxBytes - 44) / bytesPerSec);
+  const totalSamples = audioBuffer.length;
+  const samplesPerChunk = Math.floor(maxSecs * audioBuffer.sampleRate);
+  const count = Math.ceil(totalSamples / samplesPerChunk);
+  const chunks = [];
+  for (let i = 0; i < count; i++) {
+    const start = i * samplesPerChunk;
+    const end = Math.min(start + samplesPerChunk, totalSamples);
+    chunks.push(audioBufferRangeToWav(audioBuffer, start, end));
+  }
+  return chunks;
+}
+
+async function transcribeBlob(blob, filename, apiKey) {
+  const fd = new FormData();
+  fd.append('file', blob, filename);
+  fd.append('model', 'whisper-large-v3');
+  fd.append('language', 'ru');
+  fd.append('response_format', 'text');
+  const resp = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: fd
+  });
+  if (!resp.ok) throw new Error(`Groq ${resp.status}: ${await resp.text()}`);
+  return (await resp.text()).trim();
+}
+
+async function transcribeChunks(chunks, apiKey, onStatus, timer = null, estimate = null) {
+  const total       = chunks.length;
+  const summaryMs   = estimate?.summaryMs   ?? EST_FINAL_SUMMARY_MS;
+  const totalMs     = estimate?.totalMs     ?? null;
+  const videoMs     = estimate?.videoExtractMs ?? 0;
+  const transcMs    = estimate?.transcriptionMs ?? total * EST_CHUNK_TRANSCRIPTION_MS;
+
+  const startPct = totalMs ? (videoMs / totalMs) * 100 : 1;
+  const endPct   = totalMs ? ((videoMs + transcMs) / totalMs) * 100 : 78;
+
+  const parts = [];
+  for (let i = 0; i < total; i++) {
+    const stageText = `Транскрибирую часть ${i + 1} из ${total}...`;
+    onStatus(stageText);
+    timer?.setStage(stageText);
+    timer?.setProgress(
+      startPct + (i / total) * (endPct - startPct),
+      (total - i) * EST_CHUNK_TRANSCRIPTION_MS + summaryMs
+    );
+    parts.push(await transcribeBlob(chunks[i], `chunk_${i + 1}.wav`, apiKey));
+  }
+  const joinText = 'Объединяю транскрипт...';
+  onStatus(joinText);
+  timer?.setStage(joinText);
+  timer?.setProgress(endPct, summaryMs);
+  return parts.join('\n\n');
+}
+
+async function processFileForTranscription(file, apiKey, onStatus, timer = null, estimate = null) {
+  onStatus('Проверяю файл...');
+  timer?.setStage('Проверяю файл...');
+
+  if (file.size <= FILE_TRANSCRIPTION_MAX) {
+    const stageText = 'Отправляю файл в Groq...';
+    onStatus(stageText);
+    timer?.setStage(stageText);
+    timer?.setProgress(5, estimate?.transcriptionMs ?? EST_DIRECT_TRANSCRIPTION_MS);
+    return await transcribeBlob(file, file.name, apiKey);
+  }
+
+  if (isVideoFile(file)) {
+    const extractText = 'Извлекаю аудио из видео...';
+    onStatus(extractText);
+    timer?.setStage(extractText);
+    timer?.setProgress(1, estimate?.totalMs ?? null);
+
+    const audioBuf = await decodeAudioBuffer(file);
+    const audioWav = audioBufferRangeToWav(audioBuf, 0, audioBuf.length);
+
+    const postMs  = (estimate?.transcriptionMs ?? EST_DIRECT_TRANSCRIPTION_MS) + (estimate?.summaryMs ?? EST_FINAL_SUMMARY_MS);
+    const postPct = estimate ? Math.max(15, (estimate.videoExtractMs / estimate.totalMs) * 100) : 20;
+    timer?.setProgress(postPct, postMs);
+
+    if (audioWav.size <= FILE_TRANSCRIPTION_MAX) {
+      const groqText = 'Отправляю аудио в Groq...';
+      onStatus(groqText);
+      timer?.setStage(groqText);
+      return await transcribeBlob(audioWav, 'audio.wav', apiKey);
+    }
+    onStatus('Делю аудио на части...');
+    timer?.setStage('Делю аудио на части...');
+    const chunks = splitAudioBufferToWavChunks(audioBuf);
+    return await transcribeChunks(chunks, apiKey, onStatus, timer, estimate);
+  }
+
+  // Large audio
+  onStatus('Делю аудио на части...');
+  timer?.setStage('Делю аудио на части...');
+  const audioBuf = await decodeAudioBuffer(file);
+  const chunks = splitAudioBufferToWavChunks(audioBuf);
+  return await transcribeChunks(chunks, apiKey, onStatus, timer, estimate);
+}
 
 // ── File upload ──
 const fileInput         = document.getElementById('file-input');
@@ -492,8 +1084,336 @@ function getStoredApiKey() {
   return new Promise(resolve => chrome.storage.local.get('groqApiKey', d => resolve(d.groqApiKey || '')));
 }
 
-function buildPrompt(transcript) {
-  return `Вот транскрипт записи встречи. Сделай:\n1. Краткое общее саммари созвона\n2. Определение ключевых задач и областей ответственности сторон\n3. Важные поинты, которые можно и нужно внести в задачи и использовать в дальнейшей проработке — все согласованные моменты\n\nТранскрипт:\n${transcript}`;
+async function buildPrompt(transcript) {
+  const basePrompt = await getSummaryBasePrompt();
+  return `${basePrompt}\n\nТранскрипт:\n${transcript}`;
+}
+
+// ── Safe summarization with map-reduce for long transcripts ──
+
+const SUMMARY_MAX_INPUT_CHARS_PER_CHUNK = 7000;
+const SUMMARY_REQUEST_DELAY_MS = 13000;
+
+// ── Processing time estimate constants ──
+const EST_DIRECT_TRANSCRIPTION_MS  = 45000;  // 30–60 s, single direct upload
+const EST_CHUNK_TRANSCRIPTION_MS   = 67500;  // 45–90 s per audio chunk
+const EST_VIDEO_EXTRACT_MS_PER_MB  = 2500;   // per MB for browser AudioContext decode
+const EST_VIDEO_EXTRACT_MIN_MS     = 20000;  // minimum video decode time
+const EST_SUMMARY_CHUNK_MS         = 22500;  // 15–30 s per summary chunk
+const EST_FINAL_SUMMARY_MS         = 22500;  // 15–30 s for final summary
+
+function formatRemainingTime(ms) {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  return String(Math.floor(sec / 60)).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0');
+}
+
+function estimateTranscriptionTime(partsCount) {
+  return partsCount <= 1 ? EST_DIRECT_TRANSCRIPTION_MS : partsCount * EST_CHUNK_TRANSCRIPTION_MS;
+}
+
+function estimateSummaryChunksCount(transcriptLength) {
+  return Math.max(1, Math.ceil(transcriptLength / SUMMARY_MAX_INPUT_CHARS_PER_CHUNK));
+}
+
+function estimateSummaryTime(summaryChunks) {
+  if (summaryChunks <= 1) return EST_SUMMARY_CHUNK_MS;
+  return summaryChunks * EST_SUMMARY_CHUNK_MS
+    + summaryChunks * SUMMARY_REQUEST_DELAY_MS
+    + EST_FINAL_SUMMARY_MS;
+}
+
+function estimateFileProcessingTime(file) {
+  const isVideo = isVideoFile(file);
+  const sizeMB  = file.size / (1024 * 1024);
+
+  if (file.size <= FILE_TRANSCRIPTION_MAX) {
+    return {
+      totalMs: EST_DIRECT_TRANSCRIPTION_MS + EST_SUMMARY_CHUNK_MS,
+      partsCount: 1, videoExtractMs: 0,
+      transcriptionMs: EST_DIRECT_TRANSCRIPTION_MS,
+      summaryChunks: 1, summaryMs: EST_SUMMARY_CHUNK_MS
+    };
+  }
+
+  const videoExtractMs = isVideo
+    ? Math.max(EST_VIDEO_EXTRACT_MIN_MS, sizeMB * EST_VIDEO_EXTRACT_MS_PER_MB)
+    : 0;
+
+  // 1 audio chunk ≈ 12 MB of source (16 kHz mono WAV ~32 KB/s = 750 s = ~12 min;
+  // typical audio at 128 kbps ≈ 1 MB/min → 12 min per 12 MB of source)
+  const estimatedPartsCount = Math.max(2, Math.ceil(sizeMB / 12));
+  const transcriptionMs = estimateTranscriptionTime(estimatedPartsCount);
+  const summaryChunks   = estimateSummaryChunksCount(estimatedPartsCount * 10000);
+  const summaryMs       = estimateSummaryTime(summaryChunks);
+
+  return {
+    totalMs: videoExtractMs + transcriptionMs + summaryMs,
+    partsCount: estimatedPartsCount, videoExtractMs,
+    transcriptionMs, summaryChunks, summaryMs
+  };
+}
+
+// ── ProcessingTimer ──
+class ProcessingTimer {
+  constructor({ blockEl, stageEl, barEl, percentEl, timeEl }) {
+    this._blockEl   = blockEl;
+    this._stageEl   = stageEl;
+    this._barEl     = barEl;
+    this._percentEl = percentEl;
+    this._timeEl    = timeEl;
+    this._tickerId  = null;
+    this._remainingMs = 0;
+    this._progressPct = 0;
+  }
+
+  start(totalMs) {
+    clearInterval(this._tickerId);
+    this._remainingMs = Math.max(0, totalMs);
+    this._progressPct = 0;
+    if (this._blockEl) this._blockEl.style.display = '';
+    this._render();
+    this._tickerId = setInterval(() => {
+      if (this._remainingMs > 1000) this._remainingMs -= 1000;
+      this._render();
+    }, 1000);
+  }
+
+  setStage(text) {
+    if (this._stageEl) this._stageEl.textContent = text;
+  }
+
+  // pct and remainingMs are both optional
+  setProgress(pct, remainingMs) {
+    if (pct != null) this._progressPct = Math.min(99, Math.max(0, pct));
+    if (remainingMs != null) this._remainingMs = Math.max(0, remainingMs);
+    this._render();
+  }
+
+  addDelay(ms) {
+    this._remainingMs += Math.max(0, ms);
+    this._render();
+  }
+
+  stop() {
+    clearInterval(this._tickerId);
+    this._tickerId = null;
+    if (this._blockEl) this._blockEl.style.display = 'none';
+  }
+
+  _render() {
+    if (this._barEl)     this._barEl.style.width = this._progressPct + '%';
+    if (this._percentEl) this._percentEl.textContent = Math.round(this._progressPct) + '%';
+    if (this._timeEl) {
+      this._timeEl.textContent = this._remainingMs <= 5000
+        ? 'Осталось примерно: почти готово'
+        : 'Осталось примерно: ' + formatRemainingTime(this._remainingMs);
+    }
+  }
+}
+
+// ── Progress timer instances (after class definition) ──
+const fileProgressBlock   = document.getElementById('file-progress-block');
+const fileProgressStage   = document.getElementById('file-progress-stage');
+const fileProgressBar     = document.getElementById('file-progress-bar');
+const fileProgressPercent = document.getElementById('file-progress-percent');
+const fileProgressTime    = document.getElementById('file-progress-time');
+
+const meetingProgressBlock   = document.getElementById('meeting-progress-block');
+const meetingProgressStage   = document.getElementById('meeting-progress-stage');
+const meetingProgressBar     = document.getElementById('meeting-progress-bar');
+const meetingProgressPercent = document.getElementById('meeting-progress-percent');
+const meetingProgressTime    = document.getElementById('meeting-progress-time');
+
+const fileTimer = new ProcessingTimer({
+  blockEl: fileProgressBlock, stageEl: fileProgressStage,
+  barEl: fileProgressBar, percentEl: fileProgressPercent, timeEl: fileProgressTime
+});
+const meetingTimer = new ProcessingTimer({
+  blockEl: meetingProgressBlock, stageEl: meetingProgressStage,
+  barEl: meetingProgressBar, percentEl: meetingProgressPercent, timeEl: meetingProgressTime
+});
+
+// Parse summary status text from background.js and update meeting timer
+function parseSummaryStatusForTimer(status, timer) {
+  const chunkMatch = status.match(/часть (\d+) из (\d+)/);
+  if (chunkMatch) {
+    const current = parseInt(chunkMatch[1], 10);
+    const total   = parseInt(chunkMatch[2], 10);
+    const left    = total - current + 1;
+    const remaining = left * EST_SUMMARY_CHUNK_MS + SUMMARY_REQUEST_DELAY_MS + EST_FINAL_SUMMARY_MS;
+    timer.setStage(status);
+    timer.setProgress(80 + ((current - 1) / total) * 15, remaining);
+    return;
+  }
+  const waitMatch = status.match(/через (\d+) сек/);
+  if (waitMatch) {
+    timer.addDelay(parseInt(waitMatch[1], 10) * 1000);
+    timer.setStage(status);
+    return;
+  }
+  if (/итоговое/i.test(status)) {
+    timer.setStage(status);
+    timer.setProgress(96, EST_FINAL_SUMMARY_MS);
+    return;
+  }
+  timer.setStage(status);
+  if (/саммари/i.test(status)) timer.setProgress(80, EST_SUMMARY_CHUNK_MS);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function parseGroqRetryAfterMs(text) {
+  const match = String(text || '').match(/try again in ([\d.]+)s/i);
+  if (match) return Math.ceil(parseFloat(match[1]) + 2) * 1000;
+  return null;
+}
+
+async function groqChatCompletionWithRateLimit(payload, apiKey, onStatus, maxRetries = 3, onRateLimit = null) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (resp.status !== 429) return resp;
+    const text = await resp.text();
+    if (attempt >= maxRetries) throw new Error(`Groq rate limit exceeded: ${text}`);
+    const waitMs = parseGroqRetryAfterMs(text) || 15000;
+    const waitSec = Math.round(waitMs / 1000);
+    if (onRateLimit) {
+      onRateLimit(waitMs);
+    } else if (onStatus) {
+      onStatus(`Жду лимит Groq, продолжу через ${waitSec} сек...`);
+    }
+    await sleep(waitMs);
+  }
+}
+
+function splitTextIntoChunks(text, maxChars) {
+  if (text.length <= maxChars) return [text];
+  const chunks = [];
+  let remaining = text.trim();
+  while (remaining.length > maxChars) {
+    let splitAt = -1;
+    const paraIdx = remaining.lastIndexOf('\n\n', maxChars);
+    if (paraIdx > maxChars * 0.4) { splitAt = paraIdx + 2; }
+    if (splitAt === -1) {
+      const sentIdx = remaining.lastIndexOf('. ', maxChars);
+      if (sentIdx > maxChars * 0.4) splitAt = sentIdx + 2;
+    }
+    if (splitAt === -1) {
+      const nlIdx = remaining.lastIndexOf('\n', maxChars);
+      if (nlIdx > maxChars * 0.4) splitAt = nlIdx + 1;
+    }
+    if (splitAt === -1) splitAt = maxChars;
+    chunks.push(remaining.slice(0, splitAt).trim());
+    remaining = remaining.slice(splitAt).trim();
+  }
+  if (remaining.length > 0) chunks.push(remaining);
+  return chunks;
+}
+
+async function summarizeTranscript(summaryPrompt, apiKey, onStatus, onRateLimit = null) {
+  const resp = await groqChatCompletionWithRateLimit({
+    model: 'llama-3.1-8b-instant',
+    messages: [
+      { role: 'system', content: 'Ты аккуратный редактор деловых встреч. Возвращай только готовое саммари без вступлений и без упоминания промпта.' },
+      { role: 'user', content: summaryPrompt }
+    ],
+    max_tokens: 1400,
+    temperature: 0.2
+  }, apiKey, onStatus, 3, onRateLimit);
+  if (!resp.ok) throw new Error(`Groq summary ${resp.status}: ${await resp.text()}`);
+  const data = await resp.json();
+  const summary = String(data.choices?.[0]?.message?.content || '').trim();
+  if (!summary) throw new Error('Groq вернул пустое саммари.');
+  return summary;
+}
+
+async function summarizeChunk(chunkText, apiKey, onStatus, onRateLimit = null) {
+  const resp = await groqChatCompletionWithRateLimit({
+    model: 'llama-3.1-8b-instant',
+    messages: [
+      { role: 'system', content: 'Ты аккуратный редактор деловых встреч. Возвращай только готовое саммари без вступлений и без упоминания промпта.' },
+      { role: 'user', content: `Выдели ключевые темы, решения, задачи, договорённости и важные факты только из этого фрагмента встречи. Будь краток.\n\nФрагмент:\n${chunkText}` }
+    ],
+    max_tokens: 600,
+    temperature: 0.2
+  }, apiKey, onStatus, 3, onRateLimit);
+  if (!resp.ok) throw new Error(`Groq summary ${resp.status}: ${await resp.text()}`);
+  const data = await resp.json();
+  return String(data.choices?.[0]?.message?.content || '').trim();
+}
+
+async function summarizeFinal(partials, basePrompt, apiKey, onStatus, onRateLimit = null) {
+  const combined = partials.join('\n\n---\n\n');
+  const resp = await groqChatCompletionWithRateLimit({
+    model: 'llama-3.1-8b-instant',
+    messages: [
+      { role: 'system', content: 'Ты аккуратный редактор деловых встреч. Возвращай только готовое саммари без вступлений и без упоминания промпта.' },
+      { role: 'user', content: `${basePrompt}\n\nЧастичные саммари фрагментов встречи:\n${combined}` }
+    ],
+    max_tokens: 1400,
+    temperature: 0.2
+  }, apiKey, onStatus, 3, onRateLimit);
+  if (!resp.ok) throw new Error(`Groq summary ${resp.status}: ${await resp.text()}`);
+  const data = await resp.json();
+  const summary = String(data.choices?.[0]?.message?.content || '').trim();
+  if (!summary) throw new Error('Groq вернул пустое саммари.');
+  return summary;
+}
+
+async function summarizeTranscriptSafe(transcript, apiKey, onStatus, timer = null) {
+  const basePrompt = await getSummaryBasePrompt();
+
+  const onRateLimit = (waitMs) => {
+    const sec = Math.round(waitMs / 1000);
+    const text = `Жду лимит Groq, продолжу через ${sec} сек...`;
+    onStatus(text);
+    timer?.setStage(text);
+    timer?.addDelay(waitMs);
+  };
+
+  if (transcript.length <= SUMMARY_MAX_INPUT_CHARS_PER_CHUNK) {
+    const stageText = 'Формирую саммари...';
+    onStatus(stageText);
+    timer?.setStage(stageText);
+    timer?.setProgress(80, EST_SUMMARY_CHUNK_MS);
+    const summaryPrompt = `${basePrompt}\n\nТранскрипт:\n${transcript}`;
+    const summary = await summarizeTranscript(summaryPrompt, apiKey, onStatus, onRateLimit);
+    return { summary, summaryPrompt };
+  }
+
+  const chunks = splitTextIntoChunks(transcript, SUMMARY_MAX_INPUT_CHARS_PER_CHUNK);
+  const total = chunks.length;
+  const partials = [];
+
+  for (let i = 0; i < total; i++) {
+    const stageText = `Формирую саммари: часть ${i + 1} из ${total}...`;
+    onStatus(stageText);
+    timer?.setStage(stageText);
+    const left = total - i;
+    timer?.setProgress(
+      80 + (i / total) * 15,
+      left * EST_SUMMARY_CHUNK_MS + left * SUMMARY_REQUEST_DELAY_MS + EST_FINAL_SUMMARY_MS
+    );
+    partials.push(await summarizeChunk(chunks[i], apiKey, onStatus, onRateLimit));
+    if (i < total - 1) await sleep(SUMMARY_REQUEST_DELAY_MS);
+  }
+
+  await sleep(SUMMARY_REQUEST_DELAY_MS);
+  const finalText = 'Формирую итоговое саммари...';
+  onStatus(finalText);
+  timer?.setStage(finalText);
+  timer?.setProgress(96, EST_FINAL_SUMMARY_MS);
+
+  const summary = await summarizeFinal(partials, basePrompt, apiKey, onStatus, onRateLimit);
+  return {
+    summary,
+    summaryPrompt: `[map-reduce из ${total} фрагментов]\n\n${basePrompt}`
+  };
 }
 
 function formatDateLocal(ts) {
@@ -532,7 +1452,7 @@ function resetFileUI() {
   fileChosenName.style.display = 'none';
   fileActions.style.display = 'none';
   uploadStatus.textContent = '';
-  fileDropArea.querySelector('.file-drop-label').innerHTML = 'Нажми или перетащи файл<br><strong>Аудио или видео</strong> · до 25 МБ';
+  fileDropArea.querySelector('.file-drop-label').innerHTML = 'Нажми или перетащи файл<br><strong>Аудио или видео</strong>';
 }
 
 fileDropArea.addEventListener('click', () => fileInput.click());
@@ -548,47 +1468,66 @@ btnCancelFile.addEventListener('click', resetFileUI);
 
 btnTranscribeFile.addEventListener('click', async () => {
   if (!selectedFile) return;
-  if (selectedFile.size > 25 * 1024 * 1024) {
-    uploadStatus.textContent = '❌ Файл слишком большой. Максимум 25 МБ для Groq Whisper.';
-    return;
-  }
   const apiKey = await getStoredApiKey();
   if (!apiKey) { uploadStatus.textContent = '❌ Groq API ключ не настроен.'; return; }
 
+  const estimate = estimateFileProcessingTime(selectedFile);
+  fileTimer.start(estimate.totalMs);
+  fileTimer.setStage('Проверяю файл...');
+
   btnTranscribeFile.disabled = true;
   btnCancelFile.disabled = true;
-  uploadStatus.textContent = '⏳ Отправляю в Groq...';
   setStatus('Обработка', 'processing');
   currentTranscript = '';
-  currentPrompt = '';
-  setPromptOutput('⏳ Формирую транскрипт и промпт...', true);
+  currentSummary = '';
+  currentSummaryPrompt = '';
+  currentSummaryError = '';
+  currentMeetingId = null;
+  setFileResultOutput('⏳ Транскрибирую файл...', '⏳ Готовлю саммари...', { isEmpty: true });
 
   try {
-    const formData = new FormData();
-    formData.append('file', selectedFile, selectedFile.name);
-    formData.append('model', 'whisper-large-v3');
-    formData.append('language', 'ru');
-    formData.append('response_format', 'text');
+    const transcript = await processFileForTranscription(
+      selectedFile, apiKey,
+      (status) => { uploadStatus.textContent = '⏳ ' + status; },
+      fileTimer, estimate
+    );
 
-    const resp = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}` },
-      body: formData
-    });
-    if (!resp.ok) throw new Error(`Groq ${resp.status}: ${await resp.text()}`);
+    // After transcription: recalculate summary estimate from actual transcript length
+    const actualSummaryChunks = estimateSummaryChunksCount(transcript.length);
+    const actualSummaryMs     = estimateSummaryTime(actualSummaryChunks);
+    fileTimer.setProgress(78, actualSummaryMs);
 
-    const transcript = await resp.text();
-    const prompt = buildPrompt(transcript);
+    let summary = '';
+    let summaryError = '';
+    let summaryPrompt = '';
+    try {
+      const result = await summarizeTranscriptSafe(
+        transcript, apiKey,
+        (status) => { uploadStatus.textContent = '⏳ ' + status; },
+        fileTimer
+      );
+      summary = result.summary;
+      summaryPrompt = result.summaryPrompt;
+    } catch (e) {
+      summaryError = e.message || 'Не удалось сгенерировать саммари.';
+      console.error('[ECHO/summarizeFile]', e.message, e);
+    }
+
     const title = await generateMeetingTitle(transcript, apiKey).catch(() => fallbackMeetingTitle(transcript));
+    const meetingId = Date.now();
     currentTranscript = transcript;
-    currentPrompt = prompt;
+    currentSummary = summary;
+    currentSummaryPrompt = summaryPrompt;
+    currentSummaryError = summaryError;
+    currentMeetingId = meetingId;
+    summaryCard.style.display = '';
+    transcriptCard.style.display = '';
     transcriptEl.textContent = transcript;
     transcriptEl.className = '';
-    summaryEl.textContent = prompt;
-    summaryEl.className = '';
+    setSummaryOutput(summary, { isEmpty: !summary, error: summaryError, preview: true, showFull: !!summary });
+    setFileResultOutput(transcript, summary, { isEmpty: !summary, error: summaryError, preview: true, showFull: !!summary });
     setStatus('Готово', 'done');
 
-    const meetingId = Date.now();
     await saveMeetingLocal({
       id: meetingId,
       date: formatDateLocal(meetingId),
@@ -596,7 +1535,10 @@ btnTranscribeFile.addEventListener('click', async () => {
       title,
       chunks: [],
       transcript,
-      prompt,
+      prompt: summaryPrompt,
+      summary,
+      summaryPrompt,
+      summaryError,
       tags: [],
       status: MEETING_STATUS.DONE,
       lastError: '',
@@ -605,13 +1547,16 @@ btnTranscribeFile.addEventListener('click', async () => {
     });
     renderHistory();
 
+    fileTimer.stop();
     resetFileUI();
-    uploadStatus.textContent = '✅ Сохранено в историю';
+    uploadStatus.textContent = '✅ Готово. Сохранено в историю.';
   } catch (e) {
+    fileTimer.stop();
     console.error('[ECHO/transcribeFile]', e.message, e);
     uploadStatus.textContent = '❌ ' + e.message;
     setStatus('Ошибка', '');
-    setPromptOutput('❌ ' + e.message);
+    setSummaryOutput('❌ ' + e.message, { isEmpty: true });
+    setFileResultOutput('❌ ' + e.message, '❌ ' + e.message, { isEmpty: true });
   } finally {
     btnTranscribeFile.disabled = false;
     btnCancelFile.disabled = false;
@@ -619,62 +1564,71 @@ btnTranscribeFile.addEventListener('click', async () => {
 });
 
 // ── History export / import ──
-const btnExportHistory = document.getElementById('btn-export-history');
-const btnImportHistory = document.getElementById('btn-import-history');
-const importFileInput  = document.getElementById('import-file-input');
-const importStatus     = document.getElementById('import-status');
+function setImportStatus(text) {
+  historyViews.forEach(view => {
+    if (view.importStatus) view.importStatus.textContent = text;
+  });
+}
 
-btnExportHistory.addEventListener('click', async () => {
+function clearImportStatusSoon() {
+  setTimeout(() => setImportStatus(''), 3000);
+}
+
+async function exportHistory() {
   try {
     const meetings = await getMeetingsLocal();
     if (meetings.length === 0) {
-      importStatus.textContent = 'Нечего экспортировать — история пуста.';
-      setTimeout(() => { importStatus.textContent = ''; }, 3000);
+      setImportStatus('Нечего экспортировать — история пуста.');
+      clearImportStatusSoon();
       return;
     }
-    const exportData = meetings.map(({ id, date, dateDisplay, title, transcript, prompt, tags, status, lastError, createdAt, updatedAt }) =>
-      ({ id, date, dateDisplay, title: sanitizeMeetingTitle(title) || getMeetingTitle({ id, date, dateDisplay, title, transcript, prompt, tags }), transcript, prompt, tags: tags || [], status: status || MEETING_STATUS.DONE, lastError: lastError || '', createdAt: createdAt || id, updatedAt: updatedAt || id })
+    const exportData = meetings.map(({ id, date, dateDisplay, title, transcript, prompt, summary, summaryPrompt, summaryError, tags, status, lastError, createdAt, updatedAt }) =>
+      ({ id, date, dateDisplay, title: sanitizeMeetingTitle(title) || getMeetingTitle({ id, date, dateDisplay, title, transcript, prompt, summary, summaryPrompt, summaryError, tags }), transcript, prompt: summaryPrompt || prompt || '', summary: summary || '', summaryPrompt: summaryPrompt || prompt || '', summaryError: summaryError || '', tags: tags || [], status: status || MEETING_STATUS.DONE, lastError: lastError || '', createdAt: createdAt || id, updatedAt: updatedAt || id })
     );
     const url = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(exportData, null, 2));
     const a = document.createElement('a');
     a.href = url;
     a.download = `telemost-history-${formatDateLocal(Date.now())}.json`;
     a.click();
-    importStatus.textContent = `✅ Экспортировано ${meetings.length} встреч`;
-    setTimeout(() => { importStatus.textContent = ''; }, 3000);
+    setImportStatus(`✅ Экспортировано ${meetings.length} встреч`);
+    clearImportStatusSoon();
   } catch (e) {
     console.error('[ECHO/exportHistory]', e.message, e);
-    importStatus.textContent = '❌ Не удалось экспортировать историю';
-    setTimeout(() => { importStatus.textContent = ''; }, 3000);
+    setImportStatus('❌ Не удалось экспортировать историю');
+    clearImportStatusSoon();
   }
-});
+}
 
-btnImportHistory.addEventListener('click', () => importFileInput.click());
-
-importFileInput.addEventListener('change', async () => {
-  const file = importFileInput.files[0];
+async function importHistoryFromInput(importInput) {
+  const file = importInput.files[0];
   if (!file) return;
-  importFileInput.value = '';
+  importInput.value = '';
   let meetings;
   try {
     meetings = JSON.parse(await file.text());
     if (!Array.isArray(meetings)) throw new Error();
   } catch (e) {
     console.error('[ECHO/importHistory] failed to parse file:', e.message, e);
-    importStatus.textContent = '❌ Не удалось прочитать файл';
-    setTimeout(() => { importStatus.textContent = ''; }, 3000);
+    setImportStatus('❌ Не удалось прочитать файл');
+    clearImportStatusSoon();
     return;
   }
-  importStatus.textContent = `⏳ Импортирую ${meetings.length} встреч...`;
+  setImportStatus(`⏳ Импортирую ${meetings.length} встреч...`);
   let saved = 0;
   for (const m of meetings) {
     if (!m.id || !m.transcript) continue;
-    await saveMeetingLocal({ ...m, chunks: m.chunks || [], tags: m.tags || [], title: sanitizeMeetingTitle(m.title) || fallbackMeetingTitle(m.transcript), status: m.status || MEETING_STATUS.DONE, lastError: m.lastError || '', createdAt: m.createdAt || m.id, updatedAt: m.updatedAt || m.id });
+    await saveMeetingLocal({ ...m, chunks: m.chunks || [], tags: m.tags || [], title: sanitizeMeetingTitle(m.title) || fallbackMeetingTitle(m.transcript), prompt: m.summaryPrompt || m.prompt || '', summary: m.summary || '', summaryPrompt: m.summaryPrompt || m.prompt || '', summaryError: m.summaryError || '', status: m.status || MEETING_STATUS.DONE, lastError: m.lastError || '', createdAt: m.createdAt || m.id, updatedAt: m.updatedAt || m.id });
     saved++;
   }
-  importStatus.textContent = `✅ Импортировано ${saved} встреч`;
-  setTimeout(() => { importStatus.textContent = ''; }, 3000);
+  setImportStatus(`✅ Импортировано ${saved} встреч`);
+  clearImportStatusSoon();
   renderHistory();
+}
+
+historyViews.forEach(view => {
+  view.exportBtn?.addEventListener('click', exportHistory);
+  view.importBtn?.addEventListener('click', () => view.importInput?.click());
+  view.importInput?.addEventListener('change', () => importHistoryFromInput(view.importInput));
 });
 
 // ── Tag colors ──
@@ -739,8 +1693,8 @@ btnAddTag.addEventListener('click', async () => {
 newTagInput.addEventListener('keydown', e => { if (e.key === 'Enter') btnAddTag.click(); });
 
 // ── Tag filter above history ──
-const historyTagFilter = document.getElementById('history-tag-filter');
 let activeTagFilter = null;
+let historyQuery = '';
 
 async function renderTagFilter() {
   const tags = await getPresetTags();
@@ -751,25 +1705,39 @@ async function renderTagFilter() {
     options.push(`<option value="${escapeAttr(tag.name)}"${selected}>${escapeHtml(tag.name)}</option>`);
   }
   if (hadInvalidActiveFilter) activeTagFilter = null;
-  historyTagFilter.innerHTML = options.join('');
-  historyTagFilter.value = activeTagFilter || '';
+  historyViews.forEach(view => {
+    view.tagFilter.innerHTML = options.join('');
+    view.tagFilter.value = activeTagFilter || '';
+  });
   if (hadInvalidActiveFilter) renderHistory();
 }
 
 // ── History ──
-const searchInput = document.getElementById('history-search');
+const HISTORY_COLLAPSED_LIMIT = 7;
 let allMeetings = [];
 let openPickerId = null;
 
-historyTagFilter.addEventListener('change', () => {
-  activeTagFilter = historyTagFilter.value || null;
-  renderHistory();
-});
+historyViews.forEach(view => {
+  view.tagFilter.addEventListener('change', () => {
+    activeTagFilter = view.tagFilter.value || null;
+    historyViews.forEach(other => {
+      if (other !== view) other.tagFilter.value = activeTagFilter || '';
+    });
+    renderHistory();
+  });
 
-searchInput.addEventListener('input', () => {
-  const q = searchInput.value.toLowerCase().trim();
-  const filtered = filterMeetings(allMeetings, q, activeTagFilter);
-  renderMeetingList(filtered);
+  view.search.addEventListener('input', () => {
+    historyQuery = view.search.value.toLowerCase().trim();
+    historyViews.forEach(other => {
+      if (other !== view) other.search.value = view.search.value;
+    });
+    renderHistory();
+  });
+
+  view.toggleBtn?.addEventListener('click', () => {
+    view.expanded = !view.expanded;
+    renderHistory();
+  });
 });
 
 function filterMeetings(meetings, query, tagFilter) {
@@ -779,6 +1747,9 @@ function filterMeetings(meetings, query, tagFilter) {
     const matchesQuery = !query ||
       getMeetingTitle(m).toLowerCase().includes(query) ||
       (m.transcript || '').toLowerCase().includes(query) ||
+      (m.summary || '').toLowerCase().includes(query) ||
+      (m.summaryPrompt || m.prompt || '').toLowerCase().includes(query) ||
+      (m.summaryError || '').toLowerCase().includes(query) ||
       (m.dateDisplay || m.date || '').toLowerCase().includes(query) ||
       tagNames.some(tag => tag.includes(query));
     return matchesTag && matchesQuery;
@@ -856,24 +1827,67 @@ function tagPillHtml(name) {
   return `<span class="tag-pill" style="background:${color}18; color:${color}; border:1px solid ${color}40;">${escapeHtml(name)}</span>`;
 }
 
-function renderMeetingList(meetings) {
+function renderMeetingList(view, meetings) {
   if (meetings.length === 0) {
-    const msg = (searchInput.value.trim() || activeTagFilter) ? 'Ничего не найдено' : 'Пока нет записей';
-    historyList.innerHTML = `<li class="empty" style="display:block; padding:8px 0;">${msg}</li>`;
+    const msg = (historyQuery || activeTagFilter) ? 'Ничего не найдено' : 'Пока нет записей';
+    view.list.innerHTML = `<li class="empty" style="display:block; padding:8px 0;">${msg}</li>`;
+    if (view.toggleBtn) view.toggleBtn.style.display = 'none';
     return;
   }
 
-  historyList.innerHTML = groupMeetingsByDay(meetings).map(group => {
+  const hasHiddenItems = meetings.length > HISTORY_COLLAPSED_LIMIT;
+  const visibleMeetings = view.expanded ? meetings : meetings.slice(0, HISTORY_COLLAPSED_LIMIT);
+  if (view.toggleBtn) {
+    view.toggleBtn.style.display = hasHiddenItems ? 'block' : 'none';
+    view.toggleBtn.textContent = view.expanded
+      ? `Свернуть до ${HISTORY_COLLAPSED_LIMIT} последних`
+      : `Показать всю историю (${meetings.length})`;
+  }
+
+  view.list.innerHTML = groupMeetingsByDay(visibleMeetings).map(group => {
     const itemsHtml = group.meetings.map(m => {
       const tags = m.tags || [];
       const tagsHtml = tags.map(t => tagPillHtml(t)).join('');
-      const previewText = escapeHtml((m.transcript || '').slice(0, 60));
+      const summaryData = normalizeMeetingSummary(m);
+      const previewSource = summaryData.summary || m.transcript || summaryData.summaryError || '';
+      const previewText = escapeHtml(previewSource.slice(0, 60));
       const displayDate = escapeHtml(m.dateDisplay || m.date || '');
       const title = escapeHtml(getMeetingTitle(m));
       const isErrorMeeting = m.status === MEETING_STATUS.ERROR;
       const retranscribeBtn = m.chunks && m.chunks.length > 0
         ? `<button class="btn-retranscribe${isErrorMeeting ? ' btn-retranscribe--error' : ''}" data-id="${escapeAttr(m.id)}">${isErrorMeeting ? 'Повторить' : '↻'}</button>`
         : '';
+      const pickerKey = `${view.id}:${m.id}`;
+
+      // Asset badges
+      const hasAudio          = Array.isArray(m.chunks) && m.chunks.length > 0;
+      const hasVideo          = Array.isArray(m.videoChunks) && m.videoChunks.length > 0;
+      const videoErr          = m.videoError || '';
+      const driveStatus       = m.driveUploadStatus || '';
+      const driveDone         = driveStatus === 'done' && m.driveFolderUrl;
+      const driveErr          = driveStatus === 'error';
+      const driveUploading    = driveStatus === 'uploading';
+      const drivePending      = m.saveDestination === 'google_drive' && driveStatus === 'pending';
+      const driveBadge = driveDone
+        ? `<a class="hi-badge hi-badge--drive-ok" href="${escapeAttr(m.driveFolderUrl)}" target="_blank" title="Открыть папку на Google Drive">Drive ↗</a>`
+        : driveErr
+          ? '<span class="hi-badge hi-badge--drive-err">Drive: ошибка</span>'
+          : driveUploading
+            ? '<span class="hi-badge hi-badge--drive">Drive ⏳</span>'
+            : drivePending
+              ? '<span class="hi-badge hi-badge--drive-pending">Drive: ожидает</span>'
+              : '';
+      const retryDriveBtn = driveErr
+        ? `<button class="btn-retry-drive" data-id="${escapeAttr(m.id)}" title="${escapeAttr(m.driveUploadError || '')}">↻ Drive</button>`
+        : '';
+      const badgesHtml = [
+        hasAudio ? '<span class="hi-badge hi-badge--audio">аудио</span>' : '',
+        hasVideo ? '<span class="hi-badge hi-badge--video">видео</span>' : '',
+        (!hasVideo && videoErr) ? '<span class="hi-badge hi-badge--video-err">видео: ошибка</span>' : '',
+        driveBadge,
+        retryDriveBtn
+      ].filter(Boolean).join('');
+
       return `
         <li data-id="${escapeAttr(m.id)}">
           <div class="hi-main-row">
@@ -885,8 +1899,9 @@ function renderMeetingList(meetings) {
               </div>
               <div class="hi-tags-row">
                 ${tagsHtml}
-                <button class="btn-tag-toggle${openPickerId == m.id ? ' open' : ''}" data-id="${escapeAttr(m.id)}" title="Изменить теги">+ тег</button>
+                <button class="btn-tag-toggle${openPickerId === pickerKey ? ' open' : ''}" data-id="${escapeAttr(m.id)}" data-view="${escapeAttr(view.id)}" title="Изменить теги">+ тег</button>
               </div>
+              ${badgesHtml ? `<div class="hi-asset-badges">${badgesHtml}</div>` : ''}
               <div class="hi-preview">${previewText}${previewText ? '...' : ''}</div>
             </div>
             <div class="hi-actions">
@@ -894,7 +1909,7 @@ function renderMeetingList(meetings) {
               <button class="btn-delete-meeting" data-id="${escapeAttr(m.id)}" title="Удалить встречу">×</button>
             </div>
           </div>
-          <div class="tag-picker" id="tag-picker-${escapeAttr(m.id)}" style="display:${openPickerId == m.id ? 'block' : 'none'};"></div>
+          <div class="tag-picker" id="tag-picker-${escapeAttr(view.id)}-${escapeAttr(m.id)}" style="display:${openPickerId === pickerKey ? 'block' : 'none'};"></div>
         </li>`;
     }).join('');
 
@@ -908,7 +1923,7 @@ function renderMeetingList(meetings) {
   }).join('');
 
   // Click to load meeting
-  historyList.querySelectorAll('.history-info').forEach(el => {
+  view.list.querySelectorAll('.history-info').forEach(el => {
     el.addEventListener('click', (e) => {
       if (e.target.closest('.btn-tag-toggle')) return;
       const m = allMeetings.find(x => x.id == el.dataset.id);
@@ -918,7 +1933,7 @@ function renderMeetingList(meetings) {
   });
 
   // Retranscribe
-  historyList.querySelectorAll('.btn-retranscribe').forEach(btn => {
+  view.list.querySelectorAll('.btn-retranscribe').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       btn.disabled = true;
@@ -928,7 +1943,7 @@ function renderMeetingList(meetings) {
   });
 
   // Delete meeting
-  historyList.querySelectorAll('.btn-delete-meeting').forEach(btn => {
+  view.list.querySelectorAll('.btn-delete-meeting').forEach(btn => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       if (btn.dataset.confirming) {
@@ -951,31 +1966,51 @@ function renderMeetingList(meetings) {
   });
 
   // Tag toggle
-  historyList.querySelectorAll('.btn-tag-toggle').forEach(btn => {
+  view.list.querySelectorAll('.btn-tag-toggle').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const id = btn.dataset.id;
-      if (openPickerId == id) {
+      const pickerKey = `${btn.dataset.view}:${id}`;
+      if (openPickerId === pickerKey) {
         openPickerId = null;
         renderHistory();
       } else {
-        openPickerId = id;
+        openPickerId = pickerKey;
         renderHistory();
         const m = allMeetings.find(x => x.id == id);
-        openTagPicker(id, m ? (m.tags || []) : []);
+        openTagPicker(btn.dataset.view, id, m ? (m.tags || []) : []);
       }
+    });
+  });
+
+  // Retry Drive upload
+  view.list.querySelectorAll('.btn-retry-drive').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      btn.disabled = true;
+      btn.textContent = '⏳';
+      const id = parseMeetingId(btn.dataset.id);
+      chrome.runtime.sendMessage({ action: 'retryDriveUpload', meetingId: id }, (resp) => {
+        if (chrome.runtime.lastError || !resp || !resp.ok) {
+          btn.disabled = false;
+          btn.textContent = '↻ Drive';
+        }
+      });
     });
   });
 
   // Re-open picker if needed
   if (openPickerId) {
-    const m = allMeetings.find(x => x.id == openPickerId);
-    if (m) openTagPicker(openPickerId, m.tags || []);
+    const [viewId, meetingId] = openPickerId.split(':');
+    if (viewId === view.id) {
+      const m = allMeetings.find(x => x.id == meetingId);
+      if (m) openTagPicker(viewId, meetingId, m.tags || []);
+    }
   }
 }
 
-async function openTagPicker(meetingId, currentTags) {
-  const picker = document.getElementById(`tag-picker-${meetingId}`);
+async function openTagPicker(viewId, meetingId, currentTags) {
+  const picker = document.getElementById(`tag-picker-${viewId}-${meetingId}`);
   if (!picker) return;
 
   const presetTags = await getPresetTags();
@@ -1077,11 +2112,13 @@ async function renderHistory() {
   try {
     allMeetings = await getMeetingsLocal();
     renderPendingRecordings(allMeetings);
-    const q = searchInput.value.toLowerCase().trim();
-    renderMeetingList(filterMeetings(allMeetings, q, activeTagFilter));
+    const filteredMeetings = filterMeetings(allMeetings, historyQuery, activeTagFilter);
+    historyViews.forEach(view => renderMeetingList(view, filteredMeetings));
   } catch (e) {
     console.error('[ECHO/renderHistory]', e.message, e);
     pendingRecordingsCard.style.display = 'none';
-    historyList.innerHTML = '<li class="empty" style="display:block; padding:8px 0;">Не удалось загрузить историю</li>';
+    historyViews.forEach(view => {
+      view.list.innerHTML = '<li class="empty" style="display:block; padding:8px 0;">Не удалось загрузить историю</li>';
+    });
   }
 }
