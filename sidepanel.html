@@ -458,6 +458,13 @@
       transition: background 0.15s;
     }
     .btn-save-tags:hover { background: #b52518; opacity: 1; }
+    .btn-clear-tags {
+      flex: 0 0 auto; width: auto; padding: 6px 10px;
+      font-size: 12px; font-weight: 700;
+      background: transparent; color: #777;
+      border: 1px solid #ddd; border-radius: 8px; cursor: pointer;
+    }
+    .btn-clear-tags:hover { background: #f5f5f5; opacity: 1; }
 
     /* ── Tag filter ── */
     .history-filter-wrap { margin-bottom: 8px; }
@@ -1094,6 +1101,16 @@
 
       <div class="card">
         <div class="card-title">Управление тегами</div>
+        <div class="settings-row">
+          <div class="settings-row-label">
+            <span class="settings-row-title">Автоматически проставлять теги</span>
+            <span class="settings-row-sub">ECHO выберет до 2 точных тегов после транскрипции</span>
+          </div>
+          <label class="settings-toggle">
+            <input type="checkbox" id="setting-auto-tag-meetings" checked>
+            <span class="settings-toggle-track"></span>
+          </label>
+        </div>
         <div class="tag-mgmt-add-row">
           <input type="text" id="new-tag-input" placeholder="Название тега..." maxlength="30">
           <button class="btn-tag-add" id="btn-add-tag">+ Добавить</button>
@@ -1103,7 +1120,7 @@
         </div>
         <div class="tag-hint">
           Теги используются для фильтрации встреч в истории.<br>
-          После транскрипции они подбираются автоматически.
+          Автотеги можно снять вручную в карточке встречи через «+ тег».
         </div>
       </div>
 

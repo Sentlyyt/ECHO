@@ -143,6 +143,7 @@ setupKeyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') btnSet
 // ── Recording settings ──
 
 const settingSaveVideo   = document.getElementById('setting-save-video');
+const settingAutoTagMeetings = document.getElementById('setting-auto-tag-meetings');
 const destLocalRadio     = document.getElementById('dest-local');
 const destDriveRadio     = document.getElementById('dest-drive');
 const driveWarning       = document.getElementById('drive-warning');
@@ -150,10 +151,11 @@ const recordingWhatEl    = document.getElementById('recording-what');
 
 function getRecordingSettingsLocal() {
   return new Promise(resolve => {
-    chrome.storage.local.get(['saveVideo', 'saveDestination'], data => {
+    chrome.storage.local.get(['saveVideo', 'saveDestination', 'autoTagMeetings'], data => {
       resolve({
         saveVideo: data.saveVideo !== false,
-        saveDestination: data.saveDestination || 'local'
+        saveDestination: data.saveDestination || 'local',
+        autoTagMeetings: data.autoTagMeetings !== false
       });
     });
   });
@@ -162,13 +164,15 @@ function getRecordingSettingsLocal() {
 function saveRecordingSettingsLocal(settings) {
   chrome.storage.local.set({
     saveVideo: settings.saveVideo,
-    saveDestination: settings.saveDestination
+    saveDestination: settings.saveDestination,
+    autoTagMeetings: settings.autoTagMeetings !== false
   });
 }
 
 async function loadRecordingSettings() {
   const settings = await getRecordingSettingsLocal();
   if (settingSaveVideo)  settingSaveVideo.checked = settings.saveVideo;
+  if (settingAutoTagMeetings) settingAutoTagMeetings.checked = settings.autoTagMeetings;
   if (destLocalRadio)    destLocalRadio.checked  = settings.saveDestination === 'local';
   if (destDriveRadio)    destDriveRadio.checked  = settings.saveDestination === 'google_drive';
   applyDriveWarning(settings.saveDestination);
@@ -301,6 +305,12 @@ settingSaveVideo?.addEventListener('change', async () => {
   settings.saveVideo = settingSaveVideo.checked;
   saveRecordingSettingsLocal(settings);
   updateRecordingWhatText(settings);
+});
+
+settingAutoTagMeetings?.addEventListener('change', async () => {
+  const settings = await getRecordingSettingsLocal();
+  settings.autoTagMeetings = settingAutoTagMeetings.checked;
+  saveRecordingSettingsLocal(settings);
 });
 
 destLocalRadio?.addEventListener('change', async () => {
@@ -2054,6 +2064,7 @@ async function openTagPicker(viewId, meetingId, currentTags) {
     </div>
     <div class="tag-picker-footer">
       <span class="tag-count">${countHtml()}</span>
+      <button class="btn-clear-tags">Очистить</button>
       <button class="btn-save-tags">Сохранить</button>
     </div>
   `;
@@ -2099,6 +2110,12 @@ async function openTagPicker(viewId, meetingId, currentTags) {
   });
   oneTimeInput.addEventListener('keydown', e => {
     if (e.key === 'Enter') picker.querySelector('.btn-add-one-time').click();
+  });
+
+  picker.querySelector('.btn-clear-tags').addEventListener('click', () => {
+    selected.splice(0, selected.length);
+    picker.querySelectorAll('.tag-check-label em').forEach(el => el.closest('.tag-check-label')?.remove());
+    rebuildSelected();
   });
 
   picker.querySelector('.btn-save-tags').addEventListener('click', async () => {

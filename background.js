@@ -78,10 +78,11 @@ const MEETING_STATUS = {
 // ── Recording settings ──
 async function getRecordingSettings() {
   return new Promise(resolve => {
-    chrome.storage.local.get(['saveVideo', 'saveDestination'], data => {
+    chrome.storage.local.get(['saveVideo', 'saveDestination', 'autoTagMeetings'], data => {
       resolve({
         saveVideo: data.saveVideo !== false, // default true
-        saveDestination: data.saveDestination || 'local'
+        saveDestination: data.saveDestination || 'local',
+        autoTagMeetings: data.autoTagMeetings !== false
       });
     });
   });
@@ -816,10 +817,11 @@ async function transcribeMeeting(meetingId, { tabId = null, tabClosed = false, r
         logError('summarizeTranscript', e);
       }
     }
+    const settings = await getRecordingSettings();
     const hasMeaningfulTranscript = fullTranscript !== EMPTY_RECORDING_TRANSCRIPT;
     const tags = meeting.tags && meeting.tags.length
       ? meeting.tags
-      : hasMeaningfulTranscript
+      : hasMeaningfulTranscript && settings.autoTagMeetings
         ? await autoTagMeeting(fullTranscript, apiKey).catch((e) => { logError('autoTagMeeting', e); return []; })
         : [];
     const title = hasMeaningfulTranscript
@@ -1286,9 +1288,11 @@ async function autoTagMeeting(transcript, apiKey) {
     chrome.storage.local.get('presetTags', d => resolve(d.presetTags || []))
   );
   if (presetTags.length === 0) return [];
+  if (!hasEnoughSignalForAutoTags(transcript)) return [];
 
-  const tagNames = presetTags.map(t => t.name).join(', ');
-  const excerpt = transcript.slice(0, 2000);
+  const allowedTags = presetTags.map(t => String(t.name || '').trim()).filter(Boolean);
+  if (allowedTags.length === 0) return [];
+  const excerpt = transcript.slice(0, 3500);
 
   const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
@@ -1298,11 +1302,25 @@ async function autoTagMeeting(transcript, apiKey) {
       messages: [
         {
           role: 'system',
-          content: 'Ты классификатор деловых встреч. Из предложенного списка тегов выбери подходящие (не более 3). Ответь только именами тегов через запятую. Если ни один не подходит — ответь пустой строкой.'
+          content: [
+            'Ты строгий классификатор встреч.',
+            'Выбирай только те теги, которые явно и напрямую соответствуют содержанию транскрипта.',
+            'Не угадывай.',
+            'Не выбирай общие теги только потому, что встреча деловая.',
+            'Если тег подходит слабо или косвенно, не выбирай его.',
+            'Запрещено выбирать теги на всякий случай.',
+            'Лучше не поставить тег, чем поставить неправильный.',
+            'Если уверенность низкая или прямого соответствия нет, верни пустой список.',
+            'Выбери максимум 2 тега.',
+            'Ответь только валидным JSON в формате {"tags":["..."]}. Если тегов нет: {"tags":[]}.'
+          ].join(' ')
         },
-        { role: 'user', content: `Теги: ${tagNames}\n\nТранскрипт:\n${excerpt}` }
+        {
+          role: 'user',
+          content: `Доступные теги, выбирать можно только из этого списка:\n${JSON.stringify(allowedTags)}\n\nТранскрипт:\n${excerpt}`
+        }
       ],
-      max_tokens: 60,
+      max_tokens: 120,
       temperature: 0
     })
   });
@@ -1310,8 +1328,46 @@ async function autoTagMeeting(transcript, apiKey) {
   if (!resp.ok) return [];
   const data = await resp.json();
   const text = (data.choices?.[0]?.message?.content || '').trim();
-  if (!text) return [];
-  return text.split(',').map(s => s.trim()).filter(s => presetTags.some(t => t.name === s)).slice(0, 3);
+  return normalizeAutoTags(text, allowedTags);
+}
+
+function hasEnoughSignalForAutoTags(transcript) {
+  const text = String(transcript || '').replace(/\s+/g, ' ').trim();
+  if (!text || text === EMPTY_RECORDING_TRANSCRIPT) return false;
+  if (text.length < 400) return false;
+
+  const words = text.toLowerCase().match(/[a-zа-яё0-9-]{3,}/gi) || [];
+  if (words.length < 40) return false;
+  if (new Set(words).size < 20) return false;
+
+  return true;
+}
+
+function normalizeAutoTags(rawText, allowedTags) {
+  const cleaned = String(rawText || '')
+    .trim()
+    .replace(/^```(?:json)?/i, '')
+    .replace(/```$/i, '')
+    .trim();
+  if (!cleaned) return [];
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return [];
+  }
+
+  if (!parsed || !Array.isArray(parsed.tags)) return [];
+  const allowed = new Set(allowedTags);
+  const result = [];
+  for (const tag of parsed.tags) {
+    const name = String(tag || '').trim();
+    if (!allowed.has(name) || result.includes(name)) continue;
+    result.push(name);
+    if (result.length >= 2) break;
+  }
+  return result;
 }
 
 async function generateMeetingTitle(transcript, apiKey) {
